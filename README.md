@@ -42,26 +42,24 @@ However, upstream was built **exclusively for NVIDIA RTX hardware**:
 
 This fork bridges the gap by uniting modern community D3D12/HIP translation runtimes with a high-performance pure-PyTorch GPU engine ("Best of Both Worlds"):
 
-- 🚀 **`zluda_tensor` Mode (Default & "Best of Both Worlds"):**
+- 🚀 **`zluda_tensor` Mode ("Best of Both Worlds" Pure GPU Engine):**
   - **100% In-VRAM GPU Execution:** Accelerated directly by your AMD Radeon card via [`Speedstu/CUDA-for-AMD-Windows`](https://github.com/Speedstu/CUDA-for-AMD-Windows) (ZLUDA + AMD HIP SDK / ROCm).
   - **Zero Black Screens & Zero Window Popups:** Operates entirely inside the ComfyUI PyTorch process with zero external window creation, zero DirectX swapchain flashing, and zero OS display deadlocks.
   - **FidelityFX CAS (Contrast Adaptive Sharpening):** GPU tensor-accelerated CAS filter recovers micro-detail and edge contrast with user-adjustable strength (`sharpening`).
-  - **Full AMD-NR Parameter Suite:** Natively supports both RunningHub and AMD-NR tuning knobs:
-    - **Tuning Styles (`nr_style`):** `Cinematic` (filmic contrast, rich shadows), `Crisp` (maximum edge definition & CAS clarity), `Natural` (faithful micro-textures), `Vivid` (punchy saturation/highlights), and `Default`.
+  - **Full AMD-NR Parameter Suite (1:1 with AMDNR v0.3.5.1 GUI):**
+    - **Tuning Styles (`nr_style`):** `Default`, `Cinematic` (filmic contrast, rich shadows), `Crisp` (maximum edge definition & CAS clarity), `Natural` (faithful micro-textures), `Vivid` (punchy saturation/highlights), or `Custom`.
     - **Residual Detail Transfer:** Micro-structure frequency reconstruction (`residual_strength` / `TransferStrength`) with ratio clamping (`residual_limit` / `MaxRatio`) to prevent ringing.
     - **Temporal Stability:** Inter-frame history accumulation (`temporal_stability` / `AmdTemporalStability`) eliminates flicker.
-    - **Scaling Modes:** `1x (DLAA)`, `1.5x (Quality)`, `1.724x (Balanced)`, `2x (Performance)`, `3x (Ultra Performance)`, and bucketed targets (`1K`, `2K`, `4K`, `8K`).
-    - **Skin Tone Protection:** Automatic facial and skin region segmentation with smooth alpha masking (`skin`, `auto_mask`).
+    - **Scaling Modes:** `1x (Native / DLAA)`, `1.5x (Quality)`, `1.724x (Balanced)`, `2x (Performance)`, `3x (Ultra Performance)`, and bucketed targets (`1K`, `2K`, `4K`, `8K`).
+    - **Self-Contained Image/Video Pipeline:** Standard `image` and `video` inputs only. Auxiliary depth, surface normals, albedo, and optical flow are all generated internally on-the-fly without requiring external nodes!
 - 🎮 **`amd_nr_bridge` Mode (Offscreen Hidden D3D12/HIP Bridge):**
   - Enables D3D12/HIP translation using community shims ([`3zwr1/AMD-NR---OptiScaler`](https://github.com/3zwr1/AMD-NR---OptiScaler), [`danielblnc/DLSS-NR-on-AMD`](https://github.com/danielblnc/DLSS-NR-on-AMD), and `LmxxfNrRuntime`).
   - **Zero Black Screen Flash:** Built with an offscreen hidden tool window (`WS_EX_TOOLWINDOW` at coordinates `-32000, -32000`), completely eliminating desktop blackouts and fullscreen capture popups.
-  - **Hot-Reload Parameter Sync:** Automatically writes real-time configuration files to `dlssnr_on_amd.ini` and `OptiScaler.ini` (`[DlssNr]`).
+  - **Hot-Reload Parameter Sync:** Automatically writes real-time configuration files to `dlssnr_on_amd.ini` and `OptiScaler.ini` (`[DlssNr]` and `[AmdLook]`).
 - ⚡ **Temporal Frame Generation without NVOFA (`RH_DLSS5FrameInterpolation_AMD`):**
   - Seamlessly replaces NVIDIA's hardware optical flow with **OpenCV DIS (Dense Inverse Search)** optical flow.
   - Generates bidirectional motion fields ($F_{0 \to 1}$ and $F_{1 \to 0}$) with occlusion masking and executes sub-pixel backward warping directly on AMD GPU VRAM using PyTorch `grid_sample`.
   - Supports 2x, 3x, 4x, 6x multipliers or arbitrary target frame rates (`output_fps`), scene change cut detection (`scene_change_threshold`), and bounded-memory FFmpeg streaming with audio preservation.
-- 🔄 **Drop-in Backward Compatibility for `ComfyUI-Dlss5-AMD`:**
-  - Automatically aliases legacy nodes (`Dlss5AmdImageEnhancer`, `Dlss5AmdFsrSimple`, `Dlss5AmdNvidiaSimple`, `Dlss5AmdIntelSimple`) and accepts both `image` and `Image` input slot formats so older workflows open flawlessly.
 - 🛡️ **Zero-Collision Isolation (`_AMD` / `[AMD]`):**
   - All class mappings (`RH_DLSS5Enhance_AMD`, `RH_DLSS5FrameInterpolation_AMD`) and UI display titles include `[AMD]` to allow conflict-free coexistence alongside upstream nodes.
 - 🔄 **Self-Maintaining Upstream Updater & Auto-Rollback:**
@@ -224,6 +222,42 @@ It will display the status of each component and guide you if anything is missin
 
 ---
 
+## ⚙️ Node Parameters Reference (`RH_DLSS5Enhance_AMD`)
+
+The parameters in this node match the official **AMD-NR GUI (v0.3.5.1)** 1:1, giving you direct control over the Neural Rendering pipeline:
+
+> [!NOTE]
+> **No Auxiliary Map Inputs Needed!**  
+> Unlike game engines that require depth buffers, G-buffers, and surface normals, `RH_DLSS5Enhance_AMD` is designed as a standalone media enhancer (just like upstream `ComfyUI-RH-DLSS5`). Connect only your **`image`** or **`video`**. The node automatically synthesizes neutral depth planes, forward normals, albedo passthroughs, and OpenCV DIS optical flow internally.
+
+| Category | Parameter | Type / Values | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Media** | `image` | `IMAGE` (optional) | *None* | Input image batch. Frames are processed in temporal sequence. |
+| **Media** | `video` | `VIDEO` (optional) | *None* | Input video stream. Processed chunk-by-chunk with audio preservation. |
+| **AMD-NR Core** | `enable_nr` | `BOOLEAN` | `True` | Master toggle to enable or bypass DLSS 5 Neural Rendering. |
+| **AMD-NR Core** | `neural_runtime` | `danielblnc 0.5.1` \| `lmxxf` | `danielblnc 0.5.1` | AMD neural engine (danielblnc native HIP kernels or lmxxf runtime). |
+| **AMD-NR Core** | `upscaling_mode` | `1x` .. `3x`, `1K`, `2K`, `4K`, `8K` | `1x (Native / DLAA)` | Upscaling factor or auto-fit resolution target. |
+| **AMD-NR Core** | `nr_style` | `Default`, `Cinematic`, `Crisp`, `Natural`, `Vivid`, `Custom` | `Default` | Pre-configured style profiles (or `Custom` to use manual sliders below). |
+| **Performance** | `neural_placement` | `Before upscaling` \| `After upscaling` | `Before upscaling` | Stage at which Neural Rendering executes relative to spatial upscaling. |
+| **Performance** | `nr_resolution` | `INT` (10 - 200%) | `100` | Working resolution percentage for the neural network. |
+| **Performance** | `neural_passes` | `INT` (1 - 3) | `1` | Number of neural refinement passes (1 = fast pass, 2-3 = deeper detail). |
+| **Performance** | `full_network` | `BOOLEAN` | `False` | Run the complete 71-block neural model (lmxxf runtime). |
+| **Performance** | `fast_mode` | `BOOLEAN` | `False` | Enable low-latency execution path. |
+| **Performance** | `dynamic_nr_resolution` | `BOOLEAN` | `False` | Dynamically scale neural resolution under load. |
+| **Performance** | `model_interleave` | `Off` \| `On` | `Off` | Interleave neural evaluations across alternating frames. |
+| **Quality** | `residual_strength` | `FLOAT` (0.00 - 2.00) | `1.00` | High-frequency transfer strength (`TransferStrength`). |
+| **Quality** | `residual_limit` | `FLOAT` (0.00 - 1.00) | `0.25` | Maximum ratio clamp (`MaxRatio`) to prevent ringing/haloing. |
+| **Quality** | `temporal_stability`| `FLOAT` (0.00 - 1.00) | `0.60` | Temporal stability smoothing to suppress inter-frame flicker. |
+| **Quality** | `sharpening` | `FLOAT` (0.00 - 1.00) | `0.00` | FidelityFX CAS (Contrast Adaptive Sharpening) filter strength. |
+| **Image Look** | `colour_composition`| `Classic` \| `RenoDX` | `Classic` | Color reconstruction tone operator. |
+| **Image Look** | `detail_strength` | `FLOAT` (0.00 - 2.00) | `1.00` | Local micro-contrast and micro-geometry definition. |
+| **Image Look** | `colour_strength` | `FLOAT` (0.00 - 2.00) | `1.00` | Chroma fidelity and saturation balance. |
+| **Backend** | `backend` | `amd_nr_bridge` \| `zluda_tensor` | `amd_nr_bridge` | `amd_nr_bridge` for D3D12/OptiScaler bridge; `zluda_tensor` for pure GPU PyTorch. |
+| **Backend** | `motion` | `auto` \| `optical_flow` \| `none` | `auto` | Dense motion generation via OpenCV DIS optical flow. |
+| **Backend** | `keep_audio` | `on` \| `off` | `on` | Preserve original audio tracks in video output. |
+
+---
+
 ## 🎨 Ready-to-Use Workflow
 
 We provide a complete, pre-configured workflow located at:
@@ -233,7 +267,7 @@ We provide a complete, pre-configured workflow located at:
 1. Open ComfyUI in your browser.
 2. Drag and drop `examples/workflow_dlss5_amd.json` onto the canvas.
 3. The workflow connects:
-   - **`RH_DLSS5Enhance_AMD`:** Set `amd_backend` to `auto` (or `zluda_tensor`). Adjust `upscaling_mode`, `style` (*default*, *natural*, *cinematic*), and `structure`.
+   - **`RH_DLSS5Enhance_AMD`:** Set `backend` to `amd_nr_bridge` (or `zluda_tensor`). Adjust `nr_style` (*Default*, *Cinematic*, *Crisp*, *Natural*, *Vivid*), `upscaling_mode`, and `residual_strength`.
    - **`RH_DLSS5FrameInterpolation_AMD`:** Set `output_fps` to `2x`, `3x`, or custom target FPS. Motion is automatically handled by OpenCV DIS optical flow with high fidelity.
 
 ---

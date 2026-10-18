@@ -95,10 +95,10 @@ def patch_nodes_file(nodes_path: Path) -> bool:
             content = content.replace(old, new)
             modified = True
 
-    # 4. Ensure amd_backend option in RH_DLSS5Enhance_AMD
-    if '"amd_backend":' not in content:
+    # 4. Ensure backend option in RH_DLSS5Enhance_AMD
+    if '"backend":' not in content and '"amd_backend":' not in content:
         target = '"video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Frames are processed in temporal order."}),'
-        replacement = target + '\n                "amd_backend": (["auto", "amd_nr_bridge", "zluda_tensor"], {"default": "auto", "tooltip": "Backend selector for AMD GPUs: auto selects amd_nr_bridge if D3D12/HIP runtime is present, otherwise falls back to zluda_tensor (pure PyTorch GPU-accelerated tensor pipeline); amd_nr_bridge loads OptiScaler / danielblnc HIP bridge; zluda_tensor executes 100% on GPU via ZLUDA/ROCm."}),'
+        replacement = target + '\n                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge", "tooltip": "Backend selector for AMD GPUs: amd_nr_bridge executes via D3D12/OptiScaler bridge (supports all AMD-NR DLLs); zluda_tensor executes via PyTorch on AMD GPU."}),'
         if target in content:
             content = content.replace(target, replacement)
             modified = True

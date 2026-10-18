@@ -62,21 +62,33 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
         return
 
     # Resolve AMD-NR style preset and sliders
-    raw_style = str(params.get("nr_style", params.get("style", "default"))).lower().split()[0]
-    preset_dict = STYLE_PRESETS.get(raw_style, {})
+    raw_style = str(params.get("nr_style", "Default")).strip()
+    presets = {
+        "Cinematic": {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Crisp":     {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Natural":   {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Vivid":     {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Default":   {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+    }
+    preset_dict = presets.get(raw_style, {})
 
-    res_strength = float(params.get("residual_strength", preset_dict.get("residual_strength", params.get("intensity", 1.0))))
+    enable_nr = bool(params.get("enable_nr", True))
+    res_strength = float(params.get("residual_strength", preset_dict.get("residual_strength", 1.00)))
     res_limit = float(params.get("residual_limit", preset_dict.get("residual_limit", 0.25)))
     temp_stability = float(params.get("temporal_stability", preset_dict.get("temporal_stability", 0.60)))
     sharpness = float(params.get("sharpening", preset_dict.get("sharpening", 0.00)))
-    detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", params.get("structure", 1.0))))
-    colour_str = float(params.get("colour_strength", preset_dict.get("colour_strength", params.get("color", 1.0))))
-    composition = 1 if "reno" in str(params.get("colour_composition", "")).lower() else 0
-    passes = int(params.get("neural_passes", 2))
-    full_net = bool(params.get("full_network", True))
+    detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", 1.00)))
+    colour_str = float(params.get("colour_strength", preset_dict.get("colour_strength", 1.00)))
+    
+    placement = "0" if "before" in str(params.get("neural_placement", "Before")).lower() else "1"
+    working_scale = float(params.get("nr_resolution", 100)) / 100.0
+    passes = int(params.get("neural_passes", 1))
+    full_net = bool(params.get("full_network", False))
     fast_m = bool(params.get("fast_mode", False))
-
-    nr_backend = "daniel" if "daniel" in str(params.get("neural_runtime", "lmxxf")).lower() else "lmxxf"
+    dynamic_res = bool(params.get("dynamic_nr_resolution", False))
+    interleave = "2" if str(params.get("model_interleave", "Off")).lower() == "on" else "0"
+    composition = "1" if "reno" in str(params.get("colour_composition", "Classic")).lower() else "0"
+    nr_backend = "daniel" if "daniel" in str(params.get("neural_runtime", "daniel")).lower() else "lmxxf"
 
     ini_files = [runtime_dir / "dlssnr_on_amd.ini", runtime_dir / "OptiScaler.ini"]
     for ini_path in ini_files:
@@ -90,37 +102,26 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             if not config.has_section("DlssNr"):
                 config.add_section("DlssNr")
 
-            config.set("DlssNr", "Enabled", "true")
+            config.set("DlssNr", "Enabled", "true" if enable_nr else "false")
+            config.set("DlssNr", "AmdNeuralLighting", "true" if enable_nr else "false")
             config.set("DlssNr", "NrBackend", nr_backend)
-            config.set("DlssNr", "AmdPlacement", "0")
+            config.set("DlssNr", "AmdPlacement", placement)
             config.set("DlssNr", "RunBeforeSR", "true")
             config.set("DlssNr", "ScanExposure", "false")
-            config.set("DlssNr", "AmdNeuralLighting", "true")
-            config.set("DlssNr", "WorkingScale", "1.0")
+            config.set("DlssNr", "WorkingScale", f"{working_scale:.2f}")
             config.set("DlssNr", "Passes", str(passes))
             config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
             config.set("DlssNr", "AmdLmxxfFastMode", "true" if fast_m else "false")
             config.set("DlssNr", "AmdDanielFastMode", "true" if fast_m else "false")
+            config.set("DlssNr", "AmdDynamicRes", "true" if dynamic_res else "false")
+            config.set("DlssNr", "AmdInterleave", interleave)
             config.set("DlssNr", "TransferStrength", f"{res_strength:.4f}")
             config.set("DlssNr", "MaxRatio", f"{res_limit:.4f}")
             config.set("DlssNr", "AmdTemporalStability", f"{temp_stability:.4f}")
             config.set("DlssNr", "AmdSharpness", f"{sharpness:.4f}")
             config.set("DlssNr", "AmdDetailStrength", f"{detail_str:.4f}")
             config.set("DlssNr", "AmdColourStrength", f"{colour_str:.4f}")
-            config.set("DlssNr", "AmdComposition", str(composition))
-
-            # Style mapping for native contracts
-            style_val = int(params.get("style", 0)) if isinstance(params.get("style", 0), int) else 0
-            config.set("DlssNr", "Style", str(style_val))
-            config.set("DlssNr", "Intensity", f"{res_strength:.4f}")
-            config.set("DlssNr", "Tone", f"{float(params.get('tone', 1.0)):.4f}")
-            config.set("DlssNr", "GlobalTone", f"{float(params.get('global_tone', -1.0)):.4f}")
-            config.set("DlssNr", "Structure", f"{detail_str * 1.5:.4f}")
-            config.set("DlssNr", "Skin", f"{float(params.get('skin', -1.0)):.4f}")
-            config.set("DlssNr", "AutoMask", "1" if params.get("auto_mask", True) else "0")
-            config.set("DlssNr", "HDR", "1" if params.get("hdr", False) else "0")
-            if params.get("scale") is not None:
-                config.set("DlssNr", "Scale", f"{float(params.get('scale', 1.0)):.4f}")
+            config.set("DlssNr", "AmdComposition", composition)
 
             # [AmdLook]
             if not config.has_section("AmdLook"):
@@ -227,7 +228,7 @@ class AmdBridgeDaemon:
         self.o_bin = self.tmp_path / "o.bin"
         self.proc: Optional[subprocess.Popen] = None
         self.warmup_passes = max(1, int(params.get("warmup_frames", 1)))
-        self.eval_passes = 4
+        self.eval_passes = max(1, int(params.get("neural_passes", 1)))
         self.fps = 30
         self.frametime = 0.033
 
@@ -239,8 +240,8 @@ class AmdBridgeDaemon:
         color_rgba[..., 3] = 1.0
         color_rgba.tofile(str(self.c_bin))
 
-        # Depth: Flat 0.0 FP32
-        depth_f32 = np.zeros((h, w, 1), dtype=np.float32)
+        # Depth: Constant 0.5 FP32 (mid-plane neutral depth)
+        depth_f32 = np.full((h, w, 1), 0.5, dtype=np.float32)
         depth_f32.tofile(str(self.d_bin))
 
         # Motion vectors: RG FP16

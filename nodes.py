@@ -86,87 +86,103 @@ def _channel_choice(frame: np.ndarray, reference: np.ndarray, order: str) -> tup
 
 def _build_params(kwargs: dict) -> dict:
     mode = kwargs.get("upscaling_mode") or kwargs.get("Upscaling Mode") or _UPSCALE_MODES[0]
-    amd_backend = kwargs.get("amd_backend", "zluda_tensor")
-    from .dlss5nr.amd_engine import is_amd_environment
-    is_amd = is_amd_environment()
-
-    is_zluda = False
-    if amd_backend == "zluda_tensor":
-        is_zluda = True
-    elif amd_backend == "amd_nr_bridge":
-        is_zluda = False
-    elif amd_backend == "auto":
-        # On AMD, default to pure PyTorch GPU-accelerated ZLUDA tensor execution (zero black screens, no game window)
-        is_zluda = is_amd
+    backend = kwargs.get("backend") or kwargs.get("amd_backend") or "amd_nr_bridge"
+    is_zluda = (backend == "zluda_tensor")
 
     runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=is_zluda)
     mode_name = str(mode).strip()
     auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
     if auto_bucket is not None:
-        # Auto bucket ("1K"/"2K"/"4K"/"8K")
         common.check_runtime_files(runtime, 1.0, is_zluda=is_zluda)
     else:
-        scale = _SCALE_KEY[next(key for key in _SCALE_KEY if str(mode).startswith(key))]
+        mode_str = str(mode).lower()
+        if "1.5" in mode_str or "quality" in mode_str:
+            scale = 1.5
+        elif "1.724" in mode_str or "balanced" in mode_str or "balance" in mode_str:
+            scale = 1.724
+        elif "3x" in mode_str or "ultra" in mode_str:
+            scale = 3.0
+        elif "2x" in mode_str or "performance" in mode_str:
+            scale = 2.0
+        else:
+            scale = 1.0
         common.check_runtime_files(runtime, scale, is_zluda=is_zluda)
+
+    nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Default"
+    presets = {
+        "Cinematic": {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Crisp":     {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Natural":   {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Vivid":     {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Default":   {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+    }
+    preset_vals = presets.get(nr_style, {})
+
+    enable_nr = bool(kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True)))
+    neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "danielblnc 0.5.1")))
+    neural_placement = str(kwargs.get("neural_placement", kwargs.get("Neural placement", "Before upscaling")))
+    nr_resolution = int(kwargs.get("nr_resolution", kwargs.get("NR resolution (%)", 100)))
+    neural_passes = int(kwargs.get("neural_passes", kwargs.get("Neural passes", 1)))
+    full_network = bool(kwargs.get("full_network", kwargs.get("Full network (all 71 blocks)", False)))
+    fast_mode = bool(kwargs.get("fast_mode", kwargs.get("Fast mode", False)))
+    dynamic_nr_resolution = bool(kwargs.get("dynamic_nr_resolution", kwargs.get("Dynamic NR resolution", False)))
+    model_interleave = str(kwargs.get("model_interleave", kwargs.get("Model interleave", "Off")))
+
+    residual_strength = float(kwargs.get("residual_strength", preset_vals.get("residual_strength", 1.00)))
+    residual_limit = float(kwargs.get("residual_limit", preset_vals.get("residual_limit", 0.25)))
+    temporal_stability = float(kwargs.get("temporal_stability", preset_vals.get("temporal_stability", 0.60)))
+    sharpening = float(kwargs.get("sharpening", preset_vals.get("sharpening", 0.00)))
+    detail_strength = float(kwargs.get("detail_strength", preset_vals.get("detail_strength", 1.00)))
+    colour_strength = float(kwargs.get("colour_strength", preset_vals.get("colour_strength", 1.00)))
+    colour_composition = str(kwargs.get("colour_composition", kwargs.get("Colour composition", "Classic")))
+
     try:
         gpu_index = int(os.environ.get("DLSS5_GPU_INDEX", "0") or 0)
     except ValueError:
         gpu_index = 0
 
-    # AMD-NR parameters resolution (supports both new and legacy Dlss5-AMD Image Enhancer schemas)
-    nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or kwargs.get("style", "Default")
-    res_strength = float(kwargs.get("residual_strength", kwargs.get("Residual strength", kwargs.get("intensity", 1.0))))
-    res_limit = float(kwargs.get("residual_limit", kwargs.get("Residual limit", 0.25)))
-    temp_stability = float(kwargs.get("temporal_stability", kwargs.get("Temporal stability", 0.60)))
-    sharpness = float(kwargs.get("sharpening", kwargs.get("Sharpening (CAS)", 0.00)))
-    detail_str = float(kwargs.get("detail_strength", kwargs.get("Detail strength", kwargs.get("structure", 1.0))))
-    colour_str = float(kwargs.get("colour_strength", kwargs.get("Colour strength", kwargs.get("color", 1.0))))
-    colour_comp = kwargs.get("colour_composition") or kwargs.get("Colour composition", "Classic")
-    passes = int(kwargs.get("neural_passes", kwargs.get("Neural passes", 2)))
-    full_net = kwargs.get("full_network", kwargs.get("Full network (all 71 blocks)", True))
-    fast_m = kwargs.get("fast_mode", kwargs.get("Fast mode", False))
-    neural_rt = kwargs.get("neural_runtime", kwargs.get("Neural runtime", "lmxxf"))
-
     return {
         "runtime": runtime,
         "is_zluda": is_zluda,
-        "amd_backend": amd_backend,
+        "backend": backend,
+        "amd_backend": backend,
         "gpu_index": gpu_index,
-        "wine_prefix": str(kwargs.get("wine_prefix", "") or ""),
         "scale": None if auto_bucket is not None else scale,
         "auto_bucket": auto_bucket,
-        "preset": int(kwargs.get("preset", 0)),
-        "style": common.style_int(kwargs.get("style", "default")),
+        "enable_nr": enable_nr,
+        "neural_runtime": neural_runtime,
         "nr_style": nr_style,
-        "residual_strength": res_strength,
-        "residual_limit": res_limit,
-        "temporal_stability": temp_stability,
-        "sharpening": sharpness,
-        "detail_strength": detail_str,
-        "colour_strength": colour_str,
-        "colour_composition": colour_comp,
-        "neural_passes": passes,
-        "full_network": full_net,
-        "fast_mode": fast_m,
-        "neural_runtime": neural_rt,
-        "intensity": res_strength,
-        "tone": float(kwargs.get("tone", 1.0)),
-        "structure": detail_str * 1.5,
-        "skin": float(kwargs.get("skin", -1.0)),
-        "auto_mask": kwargs.get("auto_mask", "on") == "on",
-        "warmup_frames": int(kwargs.get("warmup_frames", 0)),
+        "neural_placement": neural_placement,
+        "nr_resolution": nr_resolution,
+        "neural_passes": neural_passes,
+        "full_network": full_network,
+        "fast_mode": fast_mode,
+        "dynamic_nr_resolution": dynamic_nr_resolution,
+        "model_interleave": model_interleave,
+        "residual_strength": residual_strength,
+        "residual_limit": residual_limit,
+        "temporal_stability": temporal_stability,
+        "sharpening": sharpening,
+        "colour_composition": colour_composition,
+        "detail_strength": detail_strength,
+        "colour_strength": colour_strength,
+        "warmup_frames": 1,
         "keep_audio": kwargs.get("keep_audio", "on") == "on",
         "motion_mode": kwargs.get("motion", "auto"),
         "scene_change_threshold": float(kwargs.get("scene_change_threshold", 0.24)),
-        "batch_temporal": kwargs.get("batch_mode", "temporal sequence") == "temporal sequence",
-        "channel_order": kwargs.get("channel_order", "auto"),
-        "hdr": kwargs.get("hdr", "off") == "on",
-        "global_tone": float(kwargs.get("global_tone", -1.0)),
-        "detail": detail_str,
-        "color": colour_str,
-        "depthmap": kwargs.get("depthmap") or kwargs.get("Depthmap"),
-        "surface_normal": kwargs.get("surface_normal") or kwargs.get("Surface Normal"),
-        "albedo": kwargs.get("albedo") or kwargs.get("Albedo"),
+        "batch_temporal": True,
+        "channel_order": "auto",
+        # Internal fallbacks for compatibility
+        "style": 0,
+        "intensity": residual_strength,
+        "structure": detail_strength,
+        "tone": 1.0,
+        "skin": -1.0,
+        "auto_mask": True,
+        "hdr": False,
+        "global_tone": -1.0,
+        "detail": detail_strength,
+        "color": colour_strength,
     }
 
 
@@ -308,46 +324,41 @@ class RH_DLSS5Enhance_AMD:
         return {
             "required": {},
             "optional": {
+                # Media inputs: only image or video (NO depth, normal, or albedo inputs required)
                 "image": ("IMAGE", {"tooltip": "Optional image batch (e.g. LoadImage). Each batch entry is one frame in temporal order."}),
-                "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Frames are processed in temporal order."}),
-                "amd_backend": (["zluda_tensor", "auto", "amd_nr_bridge"], {"default": "zluda_tensor", "tooltip": "Backend selector for AMD GPUs: zluda_tensor executes 100% on AMD GPU via Speedstu CUDA-for-AMD-Windows (ZLUDA/ROCm) with zero black screens, zero popups and pure tensor memory; amd_nr_bridge connects to OptiScaler / danielblnc D3D12/HIP runtime; auto selects zluda_tensor on AMD systems."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native size; other fixed modes upscale with the DLSS carrier (feature 1) before the neural pass (feature 18). 1K/2K/4K/8K auto-pick the smallest supported DLSS factor so the SHORT edge reaches 1080/1440/2160/4320 for the source's aspect ratio (16:9 sources land exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320); sources already at or above the bucket stay at 1x (no downscaling), and unreachable targets (below 3x reach or beyond the 7680x4320 output envelope) fail with a clear error. Fixed NVIDIA factors only."}),
-                "nr_style": (["Default", "Cinematic", "Crisp", "Natural", "Vivid"], {"default": "Default", "tooltip": "AMD-NR style tuning presets from Dlss5-AMD: Cinematic (deep contrast/shadows, richer chroma), Crisp (maximum edge definition & CAS clarity), Natural (restrained, faithful micro-textures), Vivid (punchy chroma/highlights), Default."}),
-                "residual_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "AMD-NR residual transfer strength (intensity): Controls how much high-frequency reconstructed detail is transferred to the image."}),
-                "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "AMD-NR residual clamp limit (MaxRatio): Limits excessive residual amplification to prevent haloing/clipping."}),
-                "temporal_stability": ("FLOAT", {"default": 0.60, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "AMD-NR temporal stability across sequential frames (AmdTemporalStability). Higher values suppress flicker; lower values preserve raw frame transients."}),
-                "sharpening": ("FLOAT", {"default": 0.00, "min": 0.0, "max": 1.0, "step": 0.02, "tooltip": "AMD FidelityFX CAS (Contrast Adaptive Sharpening) strength applied on GPU tensors (AmdSharpness). 0.0 = off, 0.2-0.5 = subtle crispness, 0.8+ = aggressive edge recovery."}),
-                "detail_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "AMD-NR detail strength multiplier (AmdDetailStrength / structure)."}),
-                "colour_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "AMD-NR chroma follow strength (AmdColourStrength / color)."}),
-                "colour_composition": (["Classic", "Modern", "Vibrant", "Linear"], {"default": "Classic", "tooltip": "AMD-NR colour composition mode (AmdComposition)."}),
-                "neural_passes": ("INT", {"default": 2, "min": 1, "max": 5, "step": 1, "tooltip": "Number of neural refinement passes (Passes)."}),
-                "full_network": ("BOOLEAN", {"default": True, "tooltip": "Enable full 71-block neural network execution (LmxxfFullNetwork)."}),
-                "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Run in fast mode (skips heavy iterative refinement for higher throughput)."}),
-                "neural_runtime": (["lmxxf", "danielblnc", "torch_zluda"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD."}),
-                "style": (["default", "natural", "cinematic", "off (bypass NR)"], {"default": "default", "tooltip": "Neural rendering style (Upstream RunningHub compatible). Natural stays closer to the source; cinematic pushes contrast. off (bypass NR) disables all processing."}),
-                "preset": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1, "tooltip": "Internal render preset hint (DLSSNR.Hint.Render.Preset). Keep 0 unless the runtime documents another value."}),
-                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Neural pass strength. Above 1.0 usually has no extra effect; below 1.0 blends towards the source."}),
-                "tone": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Local tone mapping strength (DLSSNR.LocalToneStrength)."}),
-                "structure": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Local detail / structure reconstruction strength (DLSSNR.LocalStructureStrength)."}),
-                "skin": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 2.0, "step": 0.05, "tooltip": "Skin structure strength (DLSSNR.SkinStructureStrength). Only active with auto_mask on. Negative leaves the parameter at the model default (the reference tool's -1)."}),
-                "auto_mask": (["on", "off"], {"default": "on", "tooltip": "Let the model detect skin regions it reconstructs. Gates the skin parameter."}),
-                "motion": (["auto", "nvof", "optical_flow", "none"], {"default": "auto", "tooltip": "Motion vectors for temporal accumulation. auto = hardware NVOFA optical flow when available, else DIS optical flow, else zero motion; nvof = hardware NVOFA (falls back to DIS with a note); optical_flow = OpenCV DIS; none = zero motion."}),
-                "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Mean luminance change above which temporal history resets (scene cut detection). Optical flow only."}),
-                "batch_mode": (["temporal sequence", "still images"], {"default": "temporal sequence", "tooltip": "still images resets temporal history for every frame; temporal sequence keeps history between frames (video / coherent batches)."}),
-                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1, "tooltip": "Warm-up budget reported to the worker. 0 is fine; the first frame initialises temporal history via reset."}),
-                "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Keep the original audio in the VIDEO output. Audio is stream-copied from the source file; when no source file is available it is re-encoded from the AUDIO input instead."}),
-                "backend": (["auto", "linux-wine", "windows-bridge"], {"default": "auto", "tooltip": "auto picks the native backend for the OS. linux-wine streams frames to dlss5nr_host.exe under Wine; windows-bridge runs the D3D12 bridge in-process."}),
-                "channel_order": (["auto", "RGBA", "BGRA"], {"default": "auto", "tooltip": "Channel layout of the NR output. auto detects R/B swap on the first frame; force RGBA/BGRA if colours look wrong."}),
-                "hdr": (["off", "on"], {"default": "off", "tooltip": "on feeds linear light to the neural model instead of the sRGB proxy (matches the reference --nr-hdr; higher-fidelity tonal response, costs a colour-space roundtrip). off keeps the default sRGB-encoded path. Existing workflows default to off."}),
-                "global_tone": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 2.0, "step": 0.05, "tooltip": "Global tone strength (DLSSNR.GlobalToneStrength) - the knob that lets the model shift overall brightness (the reference tool's global_tone). -1 leaves it at the model default; 0 disables global tone; 0-2 overrides manually. No-op on the 310.8 test runtime (verified); may act on other DLL builds."}),
-                "detail": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Composite strength over the original frame (reference tool's detail): 0 = keep the original, 1 = full NR result, up to 2 = amplify the model's change (brightening/denoise) beyond 100%. Blended in linear light."}),
-                "color": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Chroma follow (reference tool's color): 0 = keep the original hue and take only the model's luminance, 1 = take the model's colour fully. Guards against the model shifting colours."}),
-                "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional override of the runtime folder holding nvngx_dlssnr.dll (and nvngx_dlss.dll for >1x). Empty uses DLSS5_RUNTIME_DIR, then the plugin's runtime/ folder."}),
-                "wine_prefix": ("STRING", {"default": "", "tooltip": "Linux only: WINEPREFIX for the worker (ignored on Windows, where the worker runs natively). Empty uses DLSS5_WINEPREFIX, then ~/.wine; validated at run time (needs DXVK + DXVK-NVAPI installed in the prefix)."}),
-                "Image": ("IMAGE", {"tooltip": "Alternative alias for image input (backwards compatible with Dlss5-AMD Image Enhancer)."}),
-                "Depthmap": ("IMAGE", {"tooltip": "Optional depth guide map (backward compatible with Dlss5-AMD Image Enhancer)."}),
-                "Surface Normal": ("IMAGE", {"tooltip": "Optional surface normal guide map (backward compatible with Dlss5-AMD Image Enhancer)."}),
-                "Albedo": ("IMAGE", {"tooltip": "Optional albedo guide map (backward compatible with Dlss5-AMD Image Enhancer)."}),
+                "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Frames are processed in temporal order with chunked streaming."}),
+
+                # AMD-NR Core
+                "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
+                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD (danielblnc native HIP kernels or lmxxf runtime)."}),
+                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Upscaling carrier resolution (1x enhances at native size; fixed factors upscale with FSR/DLSS before/after neural pass; 1K/2K/4K/8K auto-fit short edge)."}),
+                "nr_style": (["Default", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Default", "tooltip": "AMD-NR style tuning presets: Cinematic (deep contrast/shadows), Crisp (maximum edge definition & CAS clarity), Natural (faithful micro-textures), Vivid (punchy chroma/highlights), Default, or Custom (uses slider values below)."}),
+
+                # Performance
+                "neural_placement": (["Before upscaling", "After upscaling"], {"default": "Before upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass."}),
+                "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5, "tooltip": "NR working resolution percentage (100% = full render size)."}),
+                "neural_passes": ("INT", {"default": 1, "min": 1, "max": 3, "step": 1, "tooltip": "Number of neural refinement passes (1 = default fast pass, 2-3 = deeper reconstruction)."}),
+                "full_network": ("BOOLEAN", {"default": False, "tooltip": "Run full 71-block neural network (lmxxf runtime only)."}),
+                "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Enable fast execution mode for higher throughput."}),
+                "dynamic_nr_resolution": ("BOOLEAN", {"default": False, "tooltip": "Dynamic neural rendering resolution scaling."}),
+                "model_interleave": (["Off", "On"], {"default": "Off", "tooltip": "Interleave neural model evaluations across frames."}),
+
+                # Quality
+                "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Residual transfer strength: Controls how much high-frequency reconstructed detail is transferred to the image."}),
+                "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Residual clamp ratio: Limits residual amplification to prevent haloing/clipping."}),
+                "temporal_stability": ("FLOAT", {"default": 0.60, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal stability across sequential frames to suppress flicker."}),
+                "sharpening": ("FLOAT", {"default": 0.00, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "FidelityFX CAS (Contrast Adaptive Sharpening) strength."}),
+
+                # Image look
+                "colour_composition": (["Classic", "RenoDX (experimental)"], {"default": "Classic", "tooltip": "Colour composition mode."}),
+                "detail_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Local detail and micro-structure strength."}),
+                "colour_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Chroma strength and color fidelity."}),
+
+                # Motion, Audio & Backend
+                "motion": (["auto", "optical_flow", "none"], {"default": "auto", "tooltip": "Motion vector generation: auto and optical_flow compute dense motion via OpenCV DIS internally without user input."}),
+                "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Preserve original audio in VIDEO output."}),
+                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge", "tooltip": "Execution backend: amd_nr_bridge executes via D3D12/OptiScaler bridge (supports all AMD-NR DLLs); zluda_tensor executes via PyTorch on AMD GPU."}),
+                "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional custom path to DLSS5/AMD-NR runtime folder (empty = ComfyUI/models/dlss5/)."}),
             },
         }
 
@@ -426,7 +437,8 @@ class RH_DLSS5Enhance_AMD:
         video = kwargs.get("video")
         if image is None and video is None:
             raise DLSS5Error("The enhance node needs at least one input: connect `image` or `video`.")
-        if str(kwargs.get("style", "default")).startswith("off"):
+        enable_nr = kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True))
+        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off") or str(kwargs.get("style", "")).startswith("off"):
             return self._bypass_passthrough(image, video, kwargs)
         params = _build_params(kwargs)
         is_zluda = params.get("is_zluda", False)

@@ -97,11 +97,13 @@ def test_pipeline():
         # Test single frame
         out_bridge, out_vid, note = enhancer.enhance(
             image=test_single,
-            amd_backend="amd_nr_bridge",
-            upscaling_mode="1x (DLAA / native)",
-            style="default",
-            intensity=1.0,
-            structure=1.5,
+            backend="amd_nr_bridge",
+            enable_nr=True,
+            upscaling_mode="1x (Native / DLAA)",
+            nr_style="Default",
+            residual_strength=1.0,
+            detail_strength=1.0,
+            neural_passes=1,
         )
         assert out_bridge is not None, "amd_nr_bridge returned None"
         b_mean = float(out_bridge.mean())
@@ -114,11 +116,13 @@ def test_pipeline():
         test_seq = torch.rand((3, 256, 256, 3), dtype=torch.float32, device=device)
         out_seq, _, note_seq = enhancer.enhance(
             image=test_seq,
-            amd_backend="amd_nr_bridge",
-            upscaling_mode="1x (DLAA / native)",
-            style="cinematic",
-            intensity=1.0,
-            structure=1.2,
+            backend="amd_nr_bridge",
+            enable_nr=True,
+            upscaling_mode="1x (Native / DLAA)",
+            nr_style="Cinematic",
+            residual_strength=1.0,
+            detail_strength=1.0,
+            neural_passes=1,
         )
         assert out_seq is not None, "amd_nr_bridge multi-frame returned None"
         assert out_seq.shape == (3, 256, 256, 3), f"Unexpected multi-frame shape: {out_seq.shape}"
