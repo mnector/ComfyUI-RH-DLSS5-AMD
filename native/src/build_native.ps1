@@ -6,10 +6,11 @@ function Fail([string]$Message) {
     exit 1
 }
 
-$Root = Split-Path -Parent $PSScriptRoot
+$NativeDir = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent $NativeDir
 $Native = $PSScriptRoot
-$Bin = Join-Path $Native 'bin'
-$CallerOut = Join-Path $Root 'runtime\caller'
+$Bin = Join-Path $NativeDir 'bin'
+$CallerOut = Join-Path $RepoRoot 'runtime\caller'
 
 Write-Host "[DLSS5-NR] PowerShell native builder v0.4.0"
 Write-Host "[DLSS5-NR] No Developer Command Prompt is required."
@@ -135,12 +136,12 @@ foreach ($inc in $includeDirs) { $hostCommon += ('/I' + $inc) }
 Run-Cl ($hostCommon + @($hostCpp, '/link', ('/OUT:' + $hostExe)) + ($libDirs | ForEach-Object { '/LIBPATH:' + $_ })) '[3/3] Building Linux/Wine video transport host...'
 
 # Remove intermediary build products created next to the invocation working directory / source.
-Get-ChildItem -Path $Root -Filter '*.obj' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $Root -Filter '*.exp' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $Root -Filter '*.lib' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $Native -Filter '*.obj' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $Native -Filter '*.exp' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $Native -Filter '*.lib' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $RepoRoot -Filter '*.obj' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $RepoRoot -Filter '*.exp' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $RepoRoot -Filter '*.lib' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $NativeDir -Filter '*.obj' -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $NativeDir -Filter '*.exp' -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $NativeDir -Filter '*.lib' -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host '[DLSS5-NR] Build complete.' -ForegroundColor Green
@@ -148,9 +149,6 @@ Write-Host "  Bridge: $bridgeDll"
 Write-Host "  Shim:   $callerDll"
 Write-Host "  Host:   $hostExe"
 Write-Host ""
-Write-Host 'Place nvngx_dlssnr.dll in:'
-Write-Host "  $(Join-Path $Root 'runtime\nvngx_dlssnr.dll')"
-Write-Host 'For Linux/Wine video upscale (>1x), also place the matching nvngx_dlss.dll in:'
-Write-Host "  $(Join-Path $Root 'runtime\nvngx_dlss.dll')"
+Write-Host 'Place your DLSS / AMD-NR runtimes in models/dlss5/ or runtime/,'
 Write-Host 'then restart ComfyUI.'
 exit 0

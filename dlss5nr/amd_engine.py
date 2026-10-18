@@ -11,6 +11,8 @@ import configparser
 import math
 import os
 import platform
+import subprocess
+import tempfile
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -52,14 +54,27 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     ini_files = [runtime_dir / "dlssnr_on_amd.ini", runtime_dir / "OptiScaler.ini"]
     for ini_path in ini_files:
         try:
-            config = configparser.ConfigParser()
+            config = configparser.ConfigParser(strict=False)
+            config.optionxform = str
             if ini_path.exists():
                 config.read(str(ini_path), encoding="utf-8")
+
+            # [DlssNr]
             if not config.has_section("DlssNr"):
                 config.add_section("DlssNr")
 
             config.set("DlssNr", "Enabled", "true")
-            config.set("DlssNr", "Style", str(int(params.get("style", 0))))
+            config.set("DlssNr", "NrBackend", "lmxxf")
+            config.set("DlssNr", "AmdPlacement", "0")
+            config.set("DlssNr", "RunBeforeSR", "true")
+            config.set("DlssNr", "ScanExposure", "false")
+            config.set("DlssNr", "AmdNeuralLighting", "true")
+            config.set("DlssNr", "WorkingScale", "1.0")
+            config.set("DlssNr", "Passes", "4")
+            config.set("DlssNr", "LmxxfFullNetwork", "true")
+
+            style_val = int(params.get("style", 0))
+            config.set("DlssNr", "Style", str(style_val))
             config.set("DlssNr", "Intensity", f"{float(params.get('intensity', 1.0)):.4f}")
             config.set("DlssNr", "Tone", f"{float(params.get('tone', 1.0)):.4f}")
             config.set("DlssNr", "GlobalTone", f"{float(params.get('global_tone', -1.0)):.4f}")
@@ -70,10 +85,255 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             if params.get("scale") is not None:
                 config.set("DlssNr", "Scale", f"{float(params.get('scale', 1.0)):.4f}")
 
+            # [AmdLook]
+            if not config.has_section("AmdLook"):
+                config.add_section("AmdLook")
+            config.set("AmdLook", "Enabled", "true")
+            config.set("AmdLook", "Appearance", "2")
+            config.set("AmdLook", "Mix", "1.0")
+
+            # [Upscalers]
+            if not config.has_section("Upscalers"):
+                config.add_section("Upscalers")
+            config.set("Upscalers", "Dx12Upscaler", "ffx")
+
+            # [Spoofing] - CRITICAL: Never spoof Dxgi or Nvidia vendor on AMD GPUs,
+            # otherwise OptiScaler IsAmd check fails and skips all AMD HIP passes!
+            if not config.has_section("Spoofing"):
+                config.add_section("Spoofing")
+            config.set("Spoofing", "Dxgi", "false")
+            if config.has_option("Spoofing", "SpoofedVendorId"):
+                config.remove_option("Spoofing", "SpoofedVendorId")
+
+            # [InitFlags]
+            if not config.has_section("InitFlags"):
+                config.add_section("InitFlags")
+            config.set("InitFlags", "AutoExposure", "false")
+            config.set("InitFlags", "SkipFirstFrames", "0")
+
+            # [Hotfix]
+            if not config.has_section("Hotfix"):
+                config.add_section("Hotfix")
+            config.set("Hotfix", "DisableOverlays", "true")
+            config.set("Hotfix", "CheckForUpdate", "false")
+
+            # [Menu]
+            if not config.has_section("Menu"):
+                config.add_section("Menu")
+            config.set("Menu", "OverlayMenu", "false")
+            config.set("Menu", "DisableSplash", "true")
+
+            # [Libraries] - Reset overrides to auto so adjacent runtime DLLs are loaded cleanly
+            # and no machine-specific absolute paths leak or misroute proxies.
+            if config.has_section("Libraries"):
+                for opt in config.options("Libraries"):
+                    config.set("Libraries", opt, "auto")
+
+            # [Log]
+            if not config.has_section("Log"):
+                config.add_section("Log")
+            config.set("Log", "LogLevel", "2")
+            config.set("Log", "LogToFile", "true")
+
             with open(ini_path, "w", encoding="utf-8") as f:
                 config.write(f)
         except Exception as e:
             print(f"[RH-DLSS5-AMD] Warning: Could not write {ini_path.name}: {e}", flush=True)
+
+    # Prevent double-loading deadlock: OptiScaler.dll and dxgi.dll are the same binary.
+    # dlss_bridge.exe explicitly loads OptiScaler.dll; having dxgi.dll adjacent causes
+    # Windows to load OptiScaler twice (once as dxgi proxy, once as OptiScaler.dll),
+    # causing recursive D3D12 device hooking deadlocks on AMD GPUs.
+    try:
+        dxgi_file = runtime_dir / "dxgi.dll"
+        opti_file = runtime_dir / "OptiScaler.dll"
+        if dxgi_file.is_file() and opti_file.is_file():
+            disabled_dxgi = runtime_dir / "dxgi.dll.disabled"
+            if disabled_dxgi.exists():
+                disabled_dxgi.unlink()
+            dxgi_file.rename(disabled_dxgi)
+    except Exception:
+        pass
+
+
+# -----------------------------------------------------------------------------
+# AmdBridgeDaemon: Out-of-process D3D12/OptiScaler bridge daemon
+# -----------------------------------------------------------------------------
+
+class AmdBridgeDaemon:
+    """Persistent out-of-process D3D12 bridge daemon executing OptiScaler + AMD-NR."""
+
+    def __init__(
+        self,
+        bridge_exe: Path,
+        input_w: int,
+        input_h: int,
+        output_w: int,
+        output_h: int,
+        runtime_dir: Path,
+        params: dict,
+    ):
+        self.bridge_exe = bridge_exe
+        self.input_w = input_w
+        self.input_h = input_h
+        self.output_w = output_w
+        self.output_h = output_h
+        self.runtime_dir = runtime_dir
+        self.params = params
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="rh_dlss5_amd_")
+        self.tmp_path = Path(self.tmpdir.name)
+        self.c_bin = self.tmp_path / "c.bin"
+        self.d_bin = self.tmp_path / "d.bin"
+        self.m_bin = self.tmp_path / "m.bin"
+        self.n_bin = self.tmp_path / "n.bin"
+        self.a_bin = self.tmp_path / "a.bin"
+        self.o_bin = self.tmp_path / "o.bin"
+        self.proc: Optional[subprocess.Popen] = None
+        self.warmup_passes = max(1, int(params.get("warmup_frames", 1)))
+        self.eval_passes = 4
+        self.fps = 30
+        self.frametime = 0.033
+
+    def _write_frame_inputs(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray):
+        h, w = pixels_u8.shape[:2]
+        # Color: RGBA FP16
+        color_rgba = np.empty((h, w, 4), dtype=np.float16)
+        color_rgba[..., :3] = (pixels_u8.astype(np.float32) / 255.0).astype(np.float16)
+        color_rgba[..., 3] = 1.0
+        color_rgba.tofile(str(self.c_bin))
+
+        # Depth: Flat 0.0 FP32
+        depth_f32 = np.zeros((h, w, 1), dtype=np.float32)
+        depth_f32.tofile(str(self.d_bin))
+
+        # Motion vectors: RG FP16
+        mvec_rg = np.ascontiguousarray(motion_fp16, dtype=np.float16)
+        mvec_rg.tofile(str(self.m_bin))
+
+        # Normal: Flat (0, 0, 1, 0) FP16
+        normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
+        normal_rgba[..., 2] = 1.0
+        normal_rgba.tofile(str(self.n_bin))
+
+        # Albedo: copy of color
+        color_rgba.tofile(str(self.a_bin))
+
+    def start_and_process_first(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray) -> np.ndarray:
+        self._write_frame_inputs(pixels_u8, motion_fp16)
+        cmd = [
+            str(self.bridge_exe),
+            str(self.input_w), str(self.input_h),
+            str(self.output_w), str(self.output_h),
+            str(self.c_bin), str(self.d_bin), str(self.m_bin), str(self.o_bin),
+            str(self.eval_passes), str(self.n_bin), str(self.a_bin),
+            str(self.fps), str(self.frametime), str(self.warmup_passes),
+        ]
+        print(f"[RH-DLSS5-AMD] Starting persistent AMD-NR D3D12 bridge: {self.bridge_exe.name} "
+              f"({self.input_w}x{self.input_h} -> {self.output_w}x{self.output_h})", flush=True)
+        self.proc = subprocess.Popen(
+            cmd,
+            cwd=str(self.runtime_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        # Wait for READY
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                if self.proc.poll() is not None:
+                    raise RuntimeError(f"AMD-NR bridge exited during startup with code {self.proc.returncode}")
+                raise RuntimeError("AMD-NR bridge closed pipe unexpectedly before READY")
+            line = line.strip()
+            if line == "READY":
+                break
+        if not self.o_bin.exists():
+            raise RuntimeError("AMD-NR bridge did not produce output for frame 0")
+        out_raw = np.fromfile(str(self.o_bin), dtype=np.float16).reshape((self.output_h, self.output_w, 4))
+        return out_raw[..., :3].astype(np.float32)
+
+    def process_next_frame(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray) -> np.ndarray:
+        if self.proc is None or self.proc.poll() is not None:
+            raise RuntimeError("AMD-NR bridge is not running")
+        self._write_frame_inputs(pixels_u8, motion_fp16)
+        cmd_str = f"FRAME {self.c_bin} {self.d_bin} {self.m_bin} {self.o_bin} {self.n_bin} {self.a_bin} {self.eval_passes}\n"
+        self.proc.stdin.write(cmd_str)
+        self.proc.stdin.flush()
+        # Wait for DONE
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                if self.proc.poll() is not None:
+                    raise RuntimeError(f"AMD-NR bridge crashed during frame execution (code {self.proc.returncode})")
+                raise RuntimeError("AMD-NR bridge closed pipe unexpectedly")
+            line = line.strip()
+            if line == "DONE":
+                break
+        out_raw = np.fromfile(str(self.o_bin), dtype=np.float16).reshape((self.output_h, self.output_w, 4))
+        return out_raw[..., :3].astype(np.float32)
+
+    def close(self):
+        if self.proc is not None:
+            if self.proc.poll() is None:
+                try:
+                    self.proc.stdin.write("EXIT\n")
+                    self.proc.stdin.flush()
+                    self.proc.wait(timeout=5)
+                except Exception:
+                    self.proc.kill()
+            self.proc = None
+        try:
+            self.tmpdir.cleanup()
+        except Exception:
+            pass
+
+
+def amd_bridge_process_frames(
+    frames,
+    input_w: int,
+    input_h: int,
+    output_w: int,
+    output_h: int,
+    params: dict,
+    progress_callback=None,
+):
+    """Execute frame processing via persistent AMD-NR bridge daemon with linear compositing."""
+    from . import common
+    runtime: Path = params["runtime"]
+    write_amd_nr_config(runtime, params)
+
+    candidates = [
+        runtime / "dlss_bridge.exe",
+        common.PLUGIN_ROOT / "native" / "bin" / "dlss_bridge.exe",
+        common.PLUGIN_ROOT / "native" / "src" / "bin" / "dlss_bridge.exe",
+    ]
+    bridge_exe = next((c for c in candidates if c.is_file()), None)
+    if bridge_exe is None:
+        raise common.DLSS5Error(
+            "AMD-NR bridge binary (dlss_bridge.exe) not found. "
+            "Run 'python setup_amd_runtime.py' to import AMD runtime binaries."
+        )
+
+    daemon = AmdBridgeDaemon(bridge_exe, input_w, input_h, output_w, output_h, runtime, params)
+    total = int(params.get("frame_count", 1))
+    try:
+        for index, (pixels_u8, motion, reset) in enumerate(frames):
+            if index == 0:
+                out = daemon.start_and_process_first(pixels_u8, motion)
+            else:
+                out = daemon.process_next_frame(pixels_u8, motion)
+
+            if params.get("detail", 1.0) != 1.0 or params.get("color", 1.0) != 1.0:
+                out = common.nr_composite(
+                    pixels_u8, out, params["detail"], params["color"],
+                    out_is_linear=bool(params.get("hdr")), encode=not params.get("hdr"),
+                )
+            if progress_callback is not None:
+                progress_callback(index + 1, total)
+            yield out
+    finally:
+        daemon.close()
 
 
 # -----------------------------------------------------------------------------

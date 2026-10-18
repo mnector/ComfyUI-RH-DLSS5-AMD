@@ -133,9 +133,13 @@ def diagnose_environment(dlss5_dir: Path) -> None:
         "nvngx_dlss.dll": "NVIDIA DLSS carrier (required for >1x upscaling)",
         "caller/nvngx.dll_comfy.dll": "Open caller shim (bundled with plugin)",
         "OptiScaler.dll": "OptiScaler D3D12/HIP proxy (AMD-NR---OptiScaler)",
+        "dxgi.dll": "OptiScaler DXGI hook proxy",
         "LmxxfNrRuntime.dll": "Neural Rendering runtime for AMD (lmxxf / OptiScaler)",
         "LmxxfNrRuntime.pak": "Neural Rendering package weights for AMD",
+        "dlssnr_amd_pass1.dll": "danielblnc DLSS-NR AMD Pass 1 HIP runtime",
+        "dlssnr_on_amd_weights.bin": "danielblnc DLSS-NR extracted neural weights",
         "amdhip64_7.dll": "AMD HIP runtime kernel library (danielblnc DLSS-NR-on-AMD)",
+        "dlss_bridge.exe": "Dedicated AMD-NR D3D12 persistent bridge daemon",
         "dlssg-worker.exe": "DLSS-G Frame Generation worker binary",
     }
 
@@ -151,8 +155,8 @@ def diagnose_environment(dlss5_dir: Path) -> None:
     print("     -> 100% READY! Works out of the box with zero external DLLs required.")
     print("     -> Supports 1x, 1.5x, 1.724x, 2x, 3x, structure, tonemapping, and skin auto-mask.")
     print("  2. amd_nr_bridge (D3D12 / HIP via OptiScaler or danielblnc):")
-    has_nr = (dlss5_dir / "nvngx_dlssnr.dll").is_file()
-    has_bridge = (dlss5_dir / "OptiScaler.dll").is_file() or (dlss5_dir / "LmxxfNrRuntime.dll").is_file() or (dlss5_dir / "amdhip64_7.dll").is_file()
+    has_nr = (dlss5_dir / "nvngx_dlssnr.dll").is_file() or (dlss5_dir / "LmxxfNrRuntime.dll").is_file() or (dlss5_dir / "dlssnr_on_amd_weights.bin").is_file()
+    has_bridge = (dlss5_dir / "OptiScaler.dll").is_file() or (dlss5_dir / "dxgi.dll").is_file() or (dlss5_dir / "dlss_bridge.exe").is_file()
     if has_nr and has_bridge:
         print("     -> [READY] All required bridge DLLs detected in models/dlss5/.")
     else:
@@ -177,20 +181,102 @@ def extract_zip(zip_path: Path, target_dir: Path) -> None:
         print(f"[!] Extraction error: {e}")
 
 
+def import_from_source(source_dir: Path, target_dir: Path) -> None:
+    """Import AMD-NR / OptiScaler binaries from an existing directory into target_dir."""
+    if not source_dir.is_dir():
+        print(f"[!] Warning: Source directory does not exist: {source_dir}")
+        return
+    print(f"[*] Importing AMD runtime binaries from {source_dir} -> {target_dir}...")
+    patterns = [
+        "OptiScaler.dll",
+        "dxgi.dll",
+        "LmxxfNrRuntime.dll",
+        "LmxxfNrRuntime.pak",
+        "dlssnr_amd_pass*.dll",
+        "dlssnr_on_amd_weights.bin",
+        "amdhip64*.dll",
+        "nvngx_dlss*.dll",
+        "dlss_bridge.exe",
+        "OptiScaler.ini",
+        "amd_fidelityfx_*.dll",
+        "libxess*.dll",
+        "libxell.dll",
+    ]
+    imported = 0
+    for pat in patterns:
+        for f in source_dir.glob(pat):
+            if f.name.endswith(".disabled") or f.name.endswith(".bak"):
+                continue
+            dest = target_dir / f.name
+            try:
+                if not dest.exists() or dest.stat().st_size != f.stat().st_size:
+                    shutil.copy2(f, dest)
+                    imported += 1
+            except Exception as e:
+                print(f"[!] Warning copying {f.name}: {e}")
+
+    # If OptiScaler.dll and dxgi.dll are both present, disable dxgi.dll to avoid
+    # duplicate OptiScaler instantiation deadlock in dlss_bridge.exe on AMD GPUs.
+    target_dxgi = target_dir / "dxgi.dll"
+    target_opti = target_dir / "OptiScaler.dll"
+    if target_dxgi.is_file() and target_opti.is_file():
+        try:
+            disabled_dxgi = target_dir / "dxgi.dll.disabled"
+            if disabled_dxgi.exists():
+                disabled_dxgi.unlink()
+            target_dxgi.rename(disabled_dxgi)
+        except Exception:
+            pass
+
+    # Sanitize OptiScaler.ini to ensure no machine-specific absolute paths leak in [Libraries]
+    ini_file = target_dir / "OptiScaler.ini"
+    if ini_file.is_file():
+        try:
+            import configparser
+            cfg = configparser.ConfigParser(interpolation=None)
+            cfg.read(ini_file, encoding="utf-8")
+            if cfg.has_section("Libraries"):
+                for opt in cfg.options("Libraries"):
+                    cfg.set("Libraries", opt, "auto")
+            with open(ini_file, "w", encoding="utf-8") as f:
+                cfg.write(f)
+        except Exception:
+            pass
+
+    # Also if dlss_bridge.exe is imported, copy to native/bin/dlss_bridge.exe as well
+    native_bin = ROOT_DIR / "native" / "bin"
+    native_bin.mkdir(parents=True, exist_ok=True)
+    bridge_src = target_dir / "dlss_bridge.exe"
+    if bridge_src.is_file():
+        bridge_dest = native_bin / "dlss_bridge.exe"
+        if not bridge_dest.is_file() or bridge_dest.stat().st_size != bridge_src.stat().st_size:
+            try:
+                shutil.copy2(bridge_src, bridge_dest)
+            except Exception:
+                pass
+    print(f"[OK] Import complete: {imported} components imported.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="ComfyUI-RH-DLSS5-AMD Runtime Setup Helper")
     parser.add_argument("--extract", type=str, help="Extract a local ZIP (e.g. v0.6.0-Runtime.zip) to models/dlss5")
+    parser.add_argument("--import-from", type=str, help="Import runtime components from an existing local directory")
     parser.add_argument("--check", action="store_true", help="Run diagnostic check")
     args = parser.parse_args()
 
+    load_local_env()
     dlss5_dir = resolve_dlss5_models_dir()
     ensure_caller_shim(dlss5_dir)
 
+    # Automatic import from local env source if present
+    import_src = args.import_from or os.environ.get("COMFYUI_DLSS5_AMD_SRC")
+    if import_src and Path(import_src).is_dir():
+        import_from_source(Path(import_src), dlss5_dir)
+
     if args.extract:
         extract_zip(Path(args.extract), dlss5_dir)
-        diagnose_environment(dlss5_dir)
-    else:
-        diagnose_environment(dlss5_dir)
+
+    diagnose_environment(dlss5_dir)
 
 
 if __name__ == "__main__":

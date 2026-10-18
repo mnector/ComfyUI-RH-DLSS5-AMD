@@ -8,6 +8,7 @@ import re
 import shutil
 import struct
 from pathlib import Path
+from .amd_engine import is_amd_environment
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -220,13 +221,38 @@ def validate_sizes(input_w: int, input_h: int, output_w: int, output_h: int) -> 
         raise DLSS5Error("Frame stream is too large for a single enhancement session (max 2^28 pixels per surface)")
 
 
+def _load_local_env() -> None:
+    env_file = PLUGIN_ROOT / ".env.local"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except Exception:
+            pass
+
+
 def _comfy_models_dir() -> Path:
     """ComfyUI models root (persists across custom_nodes re-syncs)."""
+    _load_local_env()
+    comfy_path = os.environ.get("COMFYUI_PATH")
+    if comfy_path and Path(comfy_path).exists():
+        return Path(comfy_path) / "models"
     try:
         import folder_paths  # available inside ComfyUI
         return Path(folder_paths.models_dir)
     except Exception:
-        return PLUGIN_ROOT.parent.parent / "models"
+        pass
+    curr = PLUGIN_ROOT.resolve()
+    for _ in range(4):
+        if (curr / "models").is_dir():
+            return curr / "models"
+        if (curr / "ComfyUI" / "models").is_dir():
+            return curr / "ComfyUI" / "models"
+        curr = curr.parent
+    return PLUGIN_ROOT.parent.parent / "models"
 
 
 # The universal 310.8 DLSSNR build ships as nvngx_dlssnr.dll and covers RTX 20
@@ -466,6 +492,9 @@ def resolve_runtime_dir(runtime_dir: str = "", allow_fallback: bool = False) -> 
             (candidate / "nvngx_dlssnr.dll").is_file()
             or (candidate / "LmxxfNrRuntime.dll").is_file()
             or (candidate / "OptiScaler.dll").is_file()
+            or (candidate / "dxgi.dll").is_file()
+            or (candidate / "dlss_bridge.exe").is_file()
+            or (candidate / "dlssnr_on_amd_weights.bin").is_file()
             or (candidate / "amdhip64_7.dll").is_file()
         ):
             _ensure_caller_shim(candidate)

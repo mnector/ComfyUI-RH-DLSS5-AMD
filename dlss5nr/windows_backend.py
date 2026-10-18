@@ -95,7 +95,7 @@ def _decode_error(buffer: ctypes.Array) -> str:
 
 def process_frames(frames, input_w: int, input_h: int, output_w: int, output_h: int,
                    params: dict, progress_callback=None):
-    """Run frames through the in-process bridge.
+    """Run frames through the in-process bridge or persistent AMD-NR bridge daemon.
 
     `frames` yields (rgb_u8, motion_fp16, reset); yields RGB float32 outputs.
     """
@@ -103,7 +103,30 @@ def process_frames(frames, input_w: int, input_h: int, output_w: int, output_h: 
     runtime: Path = params["runtime"]
     # Write hot-reload configuration for AMD-NR / OptiScaler / danielblnc runtimes
     write_amd_nr_config(runtime, params)
-    # The bridge reads this at carrier-feature creation (AutoExposure/IsHDR flags).
+
+    # If amd_backend is amd_nr_bridge (or auto on AMD GPU with AMD-NR runtime files present),
+    # route to the dedicated AMD-NR persistent bridge daemon.
+    from .amd_engine import is_amd_environment, amd_bridge_process_frames
+    use_amd_daemon = False
+    amd_choice = params.get("amd_backend", "auto")
+    if amd_choice == "amd_nr_bridge":
+        use_amd_daemon = True
+    elif amd_choice == "auto" and is_amd_environment():
+        has_amd_files = (
+            (runtime / "dlss_bridge.exe").is_file()
+            or (common.PLUGIN_ROOT / "native" / "bin" / "dlss_bridge.exe").is_file()
+            or (runtime / "OptiScaler.dll").is_file()
+            or (runtime / "LmxxfNrRuntime.dll").is_file()
+        )
+        if has_amd_files:
+            use_amd_daemon = True
+
+    if use_amd_daemon:
+        for out in amd_bridge_process_frames(frames, input_w, input_h, output_w, output_h, params, progress_callback):
+            yield out
+        return
+
+    # In-process bridge for NVIDIA systems or standard NGX
     os.environ["DLSS5NR_HDR"] = "1" if params.get("hdr") else "0"
     lib = _ensure_initialized(int(params["gpu_index"]), runtime)
     error = ctypes.create_string_buffer(4096)
