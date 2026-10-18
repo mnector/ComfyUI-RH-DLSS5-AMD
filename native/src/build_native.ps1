@@ -133,7 +133,13 @@ $hostCpp = Join-Path $Native 'dlss5nr_host.cpp'
 $hostExe = Join-Path $Bin 'dlss5nr_host.exe'
 $hostCommon = @('/nologo','/std:c++17','/EHsc','/O2','/MT')
 foreach ($inc in $includeDirs) { $hostCommon += ('/I' + $inc) }
-Run-Cl ($hostCommon + @($hostCpp, '/link', ('/OUT:' + $hostExe)) + ($libDirs | ForEach-Object { '/LIBPATH:' + $_ })) '[3/3] Building Linux/Wine video transport host...'
+Run-Cl ($hostCommon + @($hostCpp, '/link', ('/OUT:' + $hostExe)) + ($libDirs | ForEach-Object { '/LIBPATH:' + $_ })) '[3/4] Building Linux/Wine video transport host...'
+
+$dlssBridgeCpp = Join-Path $Native 'dlss_bridge.cpp'
+$dlssBridgeExe = Join-Path $Bin 'dlss_bridge.exe'
+if (Test-Path $dlssBridgeCpp) {
+    Run-Cl ($hostCommon + @($dlssBridgeCpp, '/link', ('/OUT:' + $dlssBridgeExe), 'd3d12.lib', 'dxgi.lib', 'user32.lib') + ($libDirs | ForEach-Object { '/LIBPATH:' + $_ })) '[4/4] Building AMD-NR persistent bridge host (dlss_bridge.exe)...'
+}
 
 # Remove intermediary build products created next to the invocation working directory / source.
 Get-ChildItem -Path $RepoRoot -Filter '*.obj' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -148,6 +154,9 @@ Write-Host '[DLSS5-NR] Build complete.' -ForegroundColor Green
 Write-Host "  Bridge: $bridgeDll"
 Write-Host "  Shim:   $callerDll"
 Write-Host "  Host:   $hostExe"
+if (Test-Path $dlssBridgeExe) {
+    Write-Host "  AMD-NR: $dlssBridgeExe"
+}
 Write-Host ""
 Write-Host 'Place your DLSS / AMD-NR runtimes in models/dlss5/ or runtime/,'
 Write-Host 'then restart ComfyUI.'

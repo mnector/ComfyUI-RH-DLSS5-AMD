@@ -47,10 +47,37 @@ def is_amd_environment(gpu_index: int = 0) -> bool:
     return False
 
 
+STYLE_PRESETS = {
+    "cinematic": {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+    "crisp":     {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
+    "natural":   {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+    "vivid":     {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
+    "default":   {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+}
+
+
 def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     """Write or update hot-reload dlssnr_on_amd.ini and OptiScaler.ini for community AMD-NR runtimes."""
     if not runtime_dir or not runtime_dir.exists():
         return
+
+    # Resolve AMD-NR style preset and sliders
+    raw_style = str(params.get("nr_style", params.get("style", "default"))).lower().split()[0]
+    preset_dict = STYLE_PRESETS.get(raw_style, {})
+
+    res_strength = float(params.get("residual_strength", preset_dict.get("residual_strength", params.get("intensity", 1.0))))
+    res_limit = float(params.get("residual_limit", preset_dict.get("residual_limit", 0.25)))
+    temp_stability = float(params.get("temporal_stability", preset_dict.get("temporal_stability", 0.60)))
+    sharpness = float(params.get("sharpening", preset_dict.get("sharpening", 0.00)))
+    detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", params.get("structure", 1.0))))
+    colour_str = float(params.get("colour_strength", preset_dict.get("colour_strength", params.get("color", 1.0))))
+    composition = 1 if "reno" in str(params.get("colour_composition", "")).lower() else 0
+    passes = int(params.get("neural_passes", 2))
+    full_net = bool(params.get("full_network", True))
+    fast_m = bool(params.get("fast_mode", False))
+
+    nr_backend = "daniel" if "daniel" in str(params.get("neural_runtime", "lmxxf")).lower() else "lmxxf"
+
     ini_files = [runtime_dir / "dlssnr_on_amd.ini", runtime_dir / "OptiScaler.ini"]
     for ini_path in ini_files:
         try:
@@ -64,21 +91,31 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
                 config.add_section("DlssNr")
 
             config.set("DlssNr", "Enabled", "true")
-            config.set("DlssNr", "NrBackend", "lmxxf")
+            config.set("DlssNr", "NrBackend", nr_backend)
             config.set("DlssNr", "AmdPlacement", "0")
             config.set("DlssNr", "RunBeforeSR", "true")
             config.set("DlssNr", "ScanExposure", "false")
             config.set("DlssNr", "AmdNeuralLighting", "true")
             config.set("DlssNr", "WorkingScale", "1.0")
-            config.set("DlssNr", "Passes", "4")
-            config.set("DlssNr", "LmxxfFullNetwork", "true")
+            config.set("DlssNr", "Passes", str(passes))
+            config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
+            config.set("DlssNr", "AmdLmxxfFastMode", "true" if fast_m else "false")
+            config.set("DlssNr", "AmdDanielFastMode", "true" if fast_m else "false")
+            config.set("DlssNr", "TransferStrength", f"{res_strength:.4f}")
+            config.set("DlssNr", "MaxRatio", f"{res_limit:.4f}")
+            config.set("DlssNr", "AmdTemporalStability", f"{temp_stability:.4f}")
+            config.set("DlssNr", "AmdSharpness", f"{sharpness:.4f}")
+            config.set("DlssNr", "AmdDetailStrength", f"{detail_str:.4f}")
+            config.set("DlssNr", "AmdColourStrength", f"{colour_str:.4f}")
+            config.set("DlssNr", "AmdComposition", str(composition))
 
-            style_val = int(params.get("style", 0))
+            # Style mapping for native contracts
+            style_val = int(params.get("style", 0)) if isinstance(params.get("style", 0), int) else 0
             config.set("DlssNr", "Style", str(style_val))
-            config.set("DlssNr", "Intensity", f"{float(params.get('intensity', 1.0)):.4f}")
+            config.set("DlssNr", "Intensity", f"{res_strength:.4f}")
             config.set("DlssNr", "Tone", f"{float(params.get('tone', 1.0)):.4f}")
             config.set("DlssNr", "GlobalTone", f"{float(params.get('global_tone', -1.0)):.4f}")
-            config.set("DlssNr", "Structure", f"{float(params.get('structure', 1.5)):.4f}")
+            config.set("DlssNr", "Structure", f"{detail_str * 1.5:.4f}")
             config.set("DlssNr", "Skin", f"{float(params.get('skin', -1.0)):.4f}")
             config.set("DlssNr", "AutoMask", "1" if params.get("auto_mask", True) else "0")
             config.set("DlssNr", "HDR", "1" if params.get("hdr", False) else "0")
@@ -377,6 +414,29 @@ def gaussian_blur_torch(img: torch.Tensor, sigma: float = 1.5, kernel_size: int 
     return F.conv2d(img, kernel, padding=radius, groups=channels)
 
 
+def cas_sharpen_torch(img: torch.Tensor, sharpness: float = 0.0) -> torch.Tensor:
+    """AMD FidelityFX Contrast Adaptive Sharpening (CAS) on PyTorch tensors [B, C, H, W]."""
+    if sharpness <= 0.001:
+        return img
+    pad = F.pad(img, (1, 1, 1, 1), mode="replicate")
+    c = img
+    u = pad[:, :, 0:-2, 1:-1]
+    d = pad[:, :, 2:,   1:-1]
+    l = pad[:, :, 1:-1, 0:-2]
+    r = pad[:, :, 1:-1, 2:]
+
+    # Local cross min and max per channel
+    min_c = torch.min(torch.min(torch.min(u, d), torch.min(l, r)), c)
+    max_c = torch.max(torch.max(torch.max(u, d), torch.max(l, r)), c)
+
+    # Soft contrast-adaptive weight
+    amp = torch.sqrt(torch.clamp(torch.min(min_c, 2.0 - max_c) / (max_c + 1e-5), 0.0, 1.0))
+    w = amp * (-0.125 * min(1.0, max(0.0, sharpness)))
+
+    sharpened = (c + (u + d + l + r) * w) / (1.0 + 4.0 * w)
+    return torch.clamp(sharpened, 0.0, 1.0)
+
+
 # -----------------------------------------------------------------------------
 # ZludaTensorEnhancer: Pure PyTorch / ZLUDA Neural Rendering Pipeline
 # -----------------------------------------------------------------------------
@@ -384,17 +444,21 @@ def gaussian_blur_torch(img: torch.Tensor, sigma: float = 1.5, kernel_size: int 
 class ZludaTensorEnhancer:
     """Pure PyTorch execution engine for DLSS 5 Neural Rendering parameters.
 
-    Accelerated on AMD GPUs via ZLUDA / ROCm. Reproduces:
+    Accelerated on AMD GPUs via Speedstu/CUDA-for-AMD-Windows (ZLUDA / ROCm). Reproduces:
     - Upscaling: 1x (DLAA/native refinement), 1.5x, 1.724x, 2x, 3x, auto buckets (1K, 2K, 4K, 8K)
-    - Structure: High-frequency micro-contrast and edge reconstruction
-    - Tone & Styles: Linear-space tonemapping (default, natural, cinematic, global_tone, tone, hdr)
-    - Skin & AutoMask: Human skin detection in YCbCr/HSV space with modulated skin pore detail
-    - Composite: Reference-style linear detail/color compositing and intensity blending
+    - Residual Strength & Limit: Bounded high-frequency reconstruction (TransferStrength & MaxRatio)
+    - Detail & Colour: AmdDetailStrength and AmdColourStrength chroma adaptation
+    - CAS Sharpening: AMD FidelityFX Contrast Adaptive Sharpening (AmdSharpness)
+    - Temporal Stability: Inter-frame temporal accumulation smoothing (AmdTemporalStability)
+    - Styles: Presets (Default, Cinematic, Crisp, Natural, Vivid, Custom) and filmic curves
+    - Skin & AutoMask: Human skin detection in YCbCr space with modulated skin pore detail
+    - Completely in-process in VRAM: NO game windows, NO popup flashes, NO black screens.
     """
 
     def __init__(self, device: torch.device):
         self.device = device
         self.luma_weights = torch.tensor([0.2126, 0.7152, 0.0722], device=device, dtype=torch.float32).view(1, 3, 1, 1)
+        self.prev_frame: Optional[torch.Tensor] = None
 
     def process_frame(
         self,
@@ -411,18 +475,25 @@ class ZludaTensorEnhancer:
             img = frame_rgb.to(self.device, dtype=torch.float32)
 
         orig_img = img.clone()
+
+        # Resolve AMD-NR style preset & sliders
+        raw_style = str(params.get("nr_style", params.get("style", "default"))).lower().split()[0]
+        preset_values = STYLE_PRESETS.get(raw_style, {})
+
+        res_strength = float(params.get("residual_strength", preset_values.get("residual_strength", params.get("intensity", 1.0))))
+        res_limit = float(params.get("residual_limit", preset_values.get("residual_limit", 0.25)))
+        temp_stability = float(params.get("temporal_stability", preset_values.get("temporal_stability", 0.60)))
+        sharpness = float(params.get("sharpening", preset_values.get("sharpening", 0.00)))
+        detail_str = float(params.get("detail_strength", preset_values.get("detail_strength", params.get("structure", 1.0))))
+        colour_str = float(params.get("colour_strength", preset_values.get("colour_strength", params.get("color", 1.0))))
+        passes = max(1, min(4, int(params.get("neural_passes", 1))))
+
         scale = params.get("scale", 1.0) or 1.0
-        style = params.get("style", 0)
-        preset = params.get("preset", 0)
-        intensity = float(params.get("intensity", 1.0))
         tone = float(params.get("tone", 1.0))
-        structure = float(params.get("structure", 1.5))
         skin = float(params.get("skin", -1.0))
         auto_mask = bool(params.get("auto_mask", True))
         hdr = bool(params.get("hdr", False))
         global_tone = float(params.get("global_tone", -1.0))
-        detail = float(params.get("detail", 1.0))
-        color = float(params.get("color", 1.0))
 
         # 1. Upscale if output dimensions differ
         in_h, in_w = img.shape[2], img.shape[3]
@@ -435,82 +506,85 @@ class ZludaTensorEnhancer:
         # 2. Linear light domain for Neural Rendering pass
         lin_img = srgb_to_linear_torch(img) if not hdr else img.clamp(0.0, 1.0)
 
-        # 3. Micro-structure and detail reconstruction (structure)
-        low_freq = gaussian_blur_torch(lin_img, sigma=1.2, kernel_size=5)
-        high_freq = lin_img - low_freq
-        # Modulate high-frequency detail by structure parameter with soft limiting
-        structure_factor = max(0.0, structure) * 0.45
-        enhanced_high_freq = torch.tanh(high_freq * structure_factor * 2.0) * 0.5
-        reconstructed = lin_img + enhanced_high_freq
+        # 3. Multi-pass Micro-Structure and Detail Reconstruction
+        reconstructed = lin_img.clone()
+        for p in range(passes):
+            sigma_p = max(0.6, 1.2 / (p + 1))
+            low_freq = gaussian_blur_torch(reconstructed, sigma=sigma_p, kernel_size=5)
+            high_freq = reconstructed - low_freq
+            structure_factor = max(0.0, detail_str) * 0.45
+            enhanced_hf = torch.tanh(high_freq * structure_factor * 2.0) * (0.5 * detail_str)
+            clamped_delta = torch.clamp(enhanced_hf, -res_limit, res_limit) * res_strength
+            reconstructed = reconstructed + clamped_delta
 
-        # 4. Skin protection & AutoMask (skin, auto_mask)
+        # 4. Temporal accumulation smoothing across sequence frames
+        if self.prev_frame is not None and temp_stability > 0.0 and self.prev_frame.shape == reconstructed.shape:
+            blend_w = min(0.65, temp_stability * 0.45)
+            reconstructed = reconstructed * (1.0 - blend_w) + self.prev_frame * blend_w
+        self.prev_frame = reconstructed.detach()
+
+        # 5. Skin protection & AutoMask (skin, auto_mask)
         if auto_mask:
-            # Color space detection in YCbCr
             srgb_proxy = linear_to_srgb_torch(reconstructed)
             ycbcr = rgb_to_ycbcr_torch(srgb_proxy)
             y, cb, cr = ycbcr[:, 0:1], ycbcr[:, 1:2], ycbcr[:, 2:3]
-            # Skin range heuristics: Cr ~ 0.52..0.68, Cb ~ 0.30..0.50, Y ~ 0.15..0.95
             skin_mask = (
                 (cr >= 0.51) & (cr <= 0.69) &
                 (cb >= 0.29) & (cb <= 0.51) &
                 (y >= 0.12) & (y <= 0.96)
             ).float()
-            # Smooth skin mask boundary
             skin_mask = gaussian_blur_torch(skin_mask, sigma=2.5, kernel_size=7)
 
             if skin >= 0.0:
-                # Modulated skin texture adjustment
-                # skin=0 softly blurs blemishes; skin=1.5 restores delicate pores
                 skin_smooth = gaussian_blur_torch(reconstructed, sigma=1.0, kernel_size=5)
                 skin_detail = (reconstructed - skin_smooth) * (skin * 0.8)
                 skin_result = skin_smooth + skin_detail
                 reconstructed = (1.0 - skin_mask) * reconstructed + skin_mask * skin_result
 
-        # 5. Global Tone & Local Tone Mapping (global_tone, tone)
+        # 6. Global Tone & Local Tone Mapping (global_tone, tone)
         if global_tone >= 0.0:
-            # Shift overall exposure
             exposure_gain = 2.0 ** ((global_tone - 1.0) * 0.6)
             reconstructed = reconstructed * exposure_gain
 
         if tone != 1.0:
-            # Local tone adaptation: compress high dynamic range
             luma = (reconstructed * self.luma_weights).sum(dim=1, keepdim=True)
             luma_base = gaussian_blur_torch(luma, sigma=10.0, kernel_size=15)
-            # Gentle compression / expansion
             gamma = 1.0 + (tone - 1.0) * 0.25
             luma_tone = luma * torch.pow(torch.clamp(luma_base + 1e-4, 1e-4, 1.0), gamma - 1.0)
             reconstructed = reconstructed * (luma_tone / torch.clamp(luma, 1e-4))
 
-        # 6. Style Curves: default, natural, cinematic
-        # 0: default, 1: natural (soft linear fidelity), 2: cinematic (filmic S-curve)
-        if style == 2:  # Cinematic
-            # Filmic S-curve contrast
+        # 7. Style Curves
+        if raw_style == "cinematic":
             luma = (reconstructed * self.luma_weights).sum(dim=1, keepdim=True)
             cin_luma = luma * luma * (3.0 - 2.0 * torch.clamp(luma, 0.0, 1.0))
             reconstructed = reconstructed * (cin_luma / torch.clamp(luma, 1e-4))
-        elif style == 1:  # Natural
-            # Keep very close to input with soft contrast
-            pass
+        elif raw_style == "vivid":
+            # Boost linear saturation
+            luma = (reconstructed * self.luma_weights).sum(dim=1, keepdim=True)
+            reconstructed = luma + (reconstructed - luma) * 1.25
 
-        # 7. Convert to sRGB if needed
+        # 8. Convert to sRGB
         out_srgb = linear_to_srgb_torch(reconstructed) if not hdr else reconstructed
         orig_srgb = orig_base
 
-        # 8. Chroma and Detail Compositing (detail, color)
-        if detail != 1.0 or color != 1.0:
-            # Reference-style linear composite
+        # 9. Chroma & Detail Compositing (colour_strength, detail_strength)
+        if detail_str != 1.0 or colour_str != 1.0:
             lin_orig = srgb_to_linear_torch(orig_srgb)
             lin_nr = srgb_to_linear_torch(out_srgb)
             lo = (lin_orig * self.luma_weights).sum(dim=1, keepdim=True)
             ln = (lin_nr * self.luma_weights).sum(dim=1, keepdim=True)
             scale_l = ln / torch.clamp(lo, 1e-4)
             loc = lin_orig * scale_l
-            cc = loc + (lin_nr - loc) * color
-            comp = lin_orig + (cc - lin_orig) * detail
+            cc = loc + (lin_nr - loc) * colour_str
+            comp = lin_orig + (cc - lin_orig) * detail_str
             out_srgb = linear_to_srgb_torch(comp)
 
-        # 9. Intensity Blending
-        final_srgb = orig_srgb + (out_srgb - orig_srgb) * intensity
+        # 10. FidelityFX CAS Sharpening (AmdSharpness)
+        if sharpness > 0.001:
+            out_srgb = cas_sharpen_torch(out_srgb, sharpness)
+
+        # 11. Intensity Blending
+        final_srgb = orig_srgb + (out_srgb - orig_srgb) * res_strength
         final_clamped = torch.clamp(final_srgb, 0.0, 1.0)
 
         return final_clamped.squeeze(0)  # [C, H, W]

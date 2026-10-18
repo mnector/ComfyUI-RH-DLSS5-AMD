@@ -31,8 +31,8 @@ def test_pipeline():
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # 1. Test RH_DLSS5Enhance_AMD with zluda_tensor
-    print("\n--- [Test 1] Testing RH_DLSS5Enhance_AMD (amd_backend='zluda_tensor') ---")
+    # 1. Test RH_DLSS5Enhance_AMD with zluda_tensor and AMD-NR parameters
+    print("\n--- [Test 1] Testing RH_DLSS5Enhance_AMD (amd_backend='zluda_tensor', CAS sharpening & AMD-NR params) ---")
     enhancer = RH_DLSS5Enhance_AMD()
     # Batch of 2 frames 256x256 RGB float32 in [0, 1]
     input_img = torch.rand((2, 256, 256, 3), dtype=torch.float32, device=device)
@@ -40,9 +40,14 @@ def test_pipeline():
         image=input_img,
         amd_backend="zluda_tensor",
         upscaling_mode="2x (Performance)",
-        style="cinematic",
-        intensity=1.0,
-        structure=1.5,
+        nr_style="Cinematic",
+        residual_strength=1.1,
+        residual_limit=0.3,
+        temporal_stability=0.7,
+        sharpening=0.3,
+        detail_strength=1.2,
+        colour_strength=1.0,
+        neural_passes=2,
     )
     assert out_img is not None, "zluda_tensor returned None"
     assert out_img.shape == (2, 512, 512, 3), f"Unexpected shape {out_img.shape}"
@@ -50,6 +55,20 @@ def test_pipeline():
     assert mean_val > 0.05, f"Output is too dark/black: mean={mean_val}"
     print(f"[OK] zluda_tensor succeeded: shape={out_img.shape}, mean={mean_val:.4f}")
     print(f"     Status note: {note}")
+
+    # 1b. Test Legacy Alias Dlss5AmdImageEnhancer with Image parameter
+    print("\n--- [Test 1b] Testing legacy alias 'Dlss5AmdImageEnhancer' with 'Image' slot ---")
+    from rh_dlss5_amd.nodes import NODE_CLASS_MAPPINGS
+    legacy_cls = NODE_CLASS_MAPPINGS["Dlss5AmdImageEnhancer"]
+    legacy_node = legacy_cls()
+    out_legacy, _, legacy_note = legacy_node.enhance(
+        Image=input_img,
+        amd_backend="zluda_tensor",
+        upscaling_mode="1x (DLAA / native)",
+        sharpening=0.2,
+    )
+    assert out_legacy is not None, "Legacy node returned None"
+    print(f"[OK] Legacy alias Dlss5AmdImageEnhancer succeeded: shape={out_legacy.shape}")
 
     # 2. Test RH_DLSS5FrameInterpolation_AMD (OpenCV DIS + PyTorch warping)
     print("\n--- [Test 2] Testing RH_DLSS5FrameInterpolation_AMD (motion='auto' -> DIS) ---")

@@ -40,19 +40,28 @@ However, upstream was built **exclusively for NVIDIA RTX hardware**:
 
 ### How this fork solves every hurdle:
 
-This fork bridges the gap by uniting modern community D3D12/HIP translation runtimes with a high-performance pure-PyTorch GPU engine:
+This fork bridges the gap by uniting modern community D3D12/HIP translation runtimes with a high-performance pure-PyTorch GPU engine ("Best of Both Worlds"):
 
-- 🎮 **Dual-Engine Neural Rendering (`RH_DLSS5Enhance_AMD`):**
-  - **`amd_nr_bridge` Mode:** Enables direct D3D12/HIP translation using community shims ([`3zwr1/AMD-NR---OptiScaler`](https://github.com/3zwr1/AMD-NR---OptiScaler), [`danielblnc/DLSS-NR-on-AMD`](https://github.com/danielblnc/DLSS-NR-on-AMD), and `LmxxfNrRuntime`). The bridge accepts AMD adapters (`0x1002`), auto-discovers proxy runtimes, and writes real-time hot-reload configurations to `dlssnr_on_amd.ini` and `OptiScaler.ini` (`[DlssNr]`).
-  - **`zluda_tensor` Mode (100% Out-of-the-Box Fallback):** No external DLLs needed! A pure PyTorch GPU-accelerated tensor pipeline executing natively on AMD hardware via ZLUDA / ROCm. It respects every single node parameter:
+- 🚀 **`zluda_tensor` Mode (Default & "Best of Both Worlds"):**
+  - **100% In-VRAM GPU Execution:** Accelerated directly by your AMD Radeon card via [`Speedstu/CUDA-for-AMD-Windows`](https://github.com/Speedstu/CUDA-for-AMD-Windows) (ZLUDA + AMD HIP SDK / ROCm).
+  - **Zero Black Screens & Zero Window Popups:** Operates entirely inside the ComfyUI PyTorch process with zero external window creation, zero DirectX swapchain flashing, and zero OS display deadlocks.
+  - **FidelityFX CAS (Contrast Adaptive Sharpening):** GPU tensor-accelerated CAS filter recovers micro-detail and edge contrast with user-adjustable strength (`sharpening`).
+  - **Full AMD-NR Parameter Suite:** Natively supports both RunningHub and AMD-NR tuning knobs:
+    - **Tuning Styles (`nr_style`):** `Cinematic` (filmic contrast, rich shadows), `Crisp` (maximum edge definition & CAS clarity), `Natural` (faithful micro-textures), `Vivid` (punchy saturation/highlights), and `Default`.
+    - **Residual Detail Transfer:** Micro-structure frequency reconstruction (`residual_strength` / `TransferStrength`) with ratio clamping (`residual_limit` / `MaxRatio`) to prevent ringing.
+    - **Temporal Stability:** Inter-frame history accumulation (`temporal_stability` / `AmdTemporalStability`) eliminates flicker.
     - **Scaling Modes:** `1x (DLAA)`, `1.5x (Quality)`, `1.724x (Balanced)`, `2x (Performance)`, `3x (Ultra Performance)`, and bucketed targets (`1K`, `2K`, `4K`, `8K`).
-    - **Micro-Structure & Frequency Enhancement:** Preserves delicate high frequencies without ringing artifacts (`structure`).
-    - **Linear Light Color Grading:** Color-accurate tone curves across `default`, `natural`, and `cinematic` styles, HDR tone expansion, and global exposure adjustments (`global_tone`, `tone`, `hdr`).
-    - **YCbCr/HSV Skin Tone Protection:** Automatic facial and skin region segmentation with smooth alpha masking (`skin`, `auto_mask`).
+    - **Skin Tone Protection:** Automatic facial and skin region segmentation with smooth alpha masking (`skin`, `auto_mask`).
+- 🎮 **`amd_nr_bridge` Mode (Offscreen Hidden D3D12/HIP Bridge):**
+  - Enables D3D12/HIP translation using community shims ([`3zwr1/AMD-NR---OptiScaler`](https://github.com/3zwr1/AMD-NR---OptiScaler), [`danielblnc/DLSS-NR-on-AMD`](https://github.com/danielblnc/DLSS-NR-on-AMD), and `LmxxfNrRuntime`).
+  - **Zero Black Screen Flash:** Built with an offscreen hidden tool window (`WS_EX_TOOLWINDOW` at coordinates `-32000, -32000`), completely eliminating desktop blackouts and fullscreen capture popups.
+  - **Hot-Reload Parameter Sync:** Automatically writes real-time configuration files to `dlssnr_on_amd.ini` and `OptiScaler.ini` (`[DlssNr]`).
 - ⚡ **Temporal Frame Generation without NVOFA (`RH_DLSS5FrameInterpolation_AMD`):**
   - Seamlessly replaces NVIDIA's hardware optical flow with **OpenCV DIS (Dense Inverse Search)** optical flow.
   - Generates bidirectional motion fields ($F_{0 \to 1}$ and $F_{1 \to 0}$) with occlusion masking and executes sub-pixel backward warping directly on AMD GPU VRAM using PyTorch `grid_sample`.
   - Supports 2x, 3x, 4x, 6x multipliers or arbitrary target frame rates (`output_fps`), scene change cut detection (`scene_change_threshold`), and bounded-memory FFmpeg streaming with audio preservation.
+- 🔄 **Drop-in Backward Compatibility for `ComfyUI-Dlss5-AMD`:**
+  - Automatically aliases legacy nodes (`Dlss5AmdImageEnhancer`, `Dlss5AmdFsrSimple`, `Dlss5AmdNvidiaSimple`, `Dlss5AmdIntelSimple`) and accepts both `image` and `Image` input slot formats so older workflows open flawlessly.
 - 🛡️ **Zero-Collision Isolation (`_AMD` / `[AMD]`):**
   - All class mappings (`RH_DLSS5Enhance_AMD`, `RH_DLSS5FrameInterpolation_AMD`) and UI display titles include `[AMD]` to allow conflict-free coexistence alongside upstream nodes.
 - 🔄 **Self-Maintaining Upstream Updater & Auto-Rollback:**

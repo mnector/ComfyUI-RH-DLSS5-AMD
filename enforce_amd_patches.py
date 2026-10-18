@@ -47,7 +47,7 @@ def patch_nodes_file(nodes_path: Path) -> bool:
         content = content.replace("class RH_DLSS5FrameInterpolation:", "class RH_DLSS5FrameInterpolation_AMD:")
         modified = True
 
-    # 2. Ensure mappings use _AMD
+    # 2. Ensure mappings use _AMD and include backward compatibility aliases
     mapping_replacements = [
         ('"RH_DLSS5Enhance": RH_DLSS5Enhance,', '"RH_DLSS5Enhance_AMD": RH_DLSS5Enhance_AMD,'),
         ('"RH_DLSS5FrameInterpolation": RH_DLSS5FrameInterpolation,', '"RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,'),
@@ -57,6 +57,32 @@ def patch_nodes_file(nodes_path: Path) -> bool:
     for old, new in mapping_replacements:
         if old in content:
             content = content.replace(old, new)
+            modified = True
+
+    if '"Dlss5AmdImageEnhancer":' not in content:
+        old_map = '"RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,\n}'
+        new_map = (
+            '"RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,\n'
+            '    # Backward compatibility aliases for previous Dlss5-AMD workflows\n'
+            '    "Dlss5AmdFsrSimple": RH_DLSS5Enhance_AMD,\n'
+            '    "Dlss5AmdNvidiaSimple": RH_DLSS5Enhance_AMD,\n'
+            '    "Dlss5AmdIntelSimple": RH_DLSS5Enhance_AMD,\n'
+            '    "Dlss5AmdImageEnhancer": RH_DLSS5Enhance_AMD,\n}'
+        )
+        if old_map in content:
+            content = content.replace(old_map, new_map)
+            modified = True
+
+        old_disp = '"RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD]",\n}'
+        new_disp = (
+            '"RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD]",\n'
+            '    "Dlss5AmdFsrSimple": "Dlss5 AMD FSR Simple (Legacy) [AMD]",\n'
+            '    "Dlss5AmdNvidiaSimple": "Dlss5 AMD Nvidia Simple (Legacy) [AMD]",\n'
+            '    "Dlss5AmdIntelSimple": "Dlss5 AMD Intel Simple (Legacy) [AMD]",\n'
+            '    "Dlss5AmdImageEnhancer": "Dlss5 AMD Image Enhancer (Legacy) [AMD]",\n}'
+        )
+        if old_disp in content:
+            content = content.replace(old_disp, new_disp)
             modified = True
 
     # 3. Ensure CATEGORY includes [AMD]
