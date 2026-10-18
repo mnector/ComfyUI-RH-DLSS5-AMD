@@ -230,6 +230,20 @@ static unsigned long long FileTimeKey(const FILETIME& ft) {
 }
 
 static HMODULE LoadCoreNGX(const std::wstring& runtime) {
+    // 0) Community AMD-NR / OptiScaler / Lmxxf proxy dlls in runtime
+    const std::wstring opti = Join(runtime, L"OptiScaler.dll");
+    if (FileExists(opti)) {
+        if (HMODULE m = LoadLibraryW(opti.c_str())) return m;
+    }
+    const std::wstring lmxxf = Join(runtime, L"LmxxfNrRuntime.dll");
+    if (FileExists(lmxxf)) {
+        if (HMODULE m = LoadLibraryW(lmxxf.c_str())) return m;
+    }
+    const std::wstring dxgi = Join(runtime, L"dxgi.dll");
+    if (FileExists(dxgi)) {
+        if (HMODULE m = LoadLibraryW(dxgi.c_str())) return m;
+    }
+
     // 1) Explicit local override. This is also the quickest workaround if
     // DriverStore auto-discovery ever misses a vendor-specific INF name.
     const std::wstring local = Join(runtime, L"_nvngx.dll");
@@ -285,7 +299,7 @@ static HMODULE LoadCoreNGX(const std::wstring& runtime) {
     return nullptr;
 }
 
-static ComPtr<ID3D12Device> CreateDevice(int nvidia_index) {
+static ComPtr<ID3D12Device> CreateDevice(int target_index) {
     ComPtr<IDXGIFactory4> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
 
@@ -295,8 +309,12 @@ static ComPtr<ID3D12Device> CreateDevice(int nvidia_index) {
         if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
         DXGI_ADAPTER_DESC1 desc{};
         adapter->GetDesc1(&desc);
-        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) || desc.VendorId != 0x10DE) continue;
-        if (seen++ != nvidia_index) continue;
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+        bool is_nvidia = (desc.VendorId == 0x10DE);
+        bool is_amd = (desc.VendorId == 0x1002);
+        bool allow_non_nvidia = is_amd || (EnvInt("DLSS5NR_ALLOW_ALL_GPUS", 1) != 0);
+        if (!is_nvidia && !allow_non_nvidia) continue;
+        if (seen++ != target_index) continue;
         char gpu_utf8[512] = {};
         WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, gpu_utf8, static_cast<int>(sizeof(gpu_utf8)), nullptr, nullptr);
         if (gpu_utf8[0]) g_gpu_name = gpu_utf8;
@@ -316,7 +334,7 @@ static ComPtr<ID3D12Device> CreateDevice(int nvidia_index) {
 
 static bool SetupD3D12() {
     g_device = CreateDevice(g_gpu_index);
-    if (!g_device) { SetError("Could not create a D3D12 device for NVIDIA GPU index %d", g_gpu_index); return false; }
+    if (!g_device) { SetError("Could not create a D3D12 device for GPU index %d", g_gpu_index); return false; }
 
     D3D12_COMMAND_QUEUE_DESC q{};
     q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;

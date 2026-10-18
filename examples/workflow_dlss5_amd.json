@@ -1,0 +1,55 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    }
+  },
+  "2": {
+    "class_type": "RH_DLSS5Enhance_AMD",
+    "inputs": {
+      "image": ["1", 0],
+      "amd_backend": "auto",
+      "upscaling_mode": "2x (Performance)",
+      "style": "default",
+      "preset": 0,
+      "intensity": 1.0,
+      "tone": 1.0,
+      "structure": 1.5,
+      "skin": 1.0,
+      "auto_mask": "on",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "batch_mode": "temporal sequence",
+      "warmup_frames": 0,
+      "keep_audio": "on",
+      "backend": "auto",
+      "channel_order": "auto",
+      "hdr": "off",
+      "global_tone": -1.0,
+      "detail": 1.0,
+      "color": 1.0,
+      "runtime_dir": "",
+      "wine_prefix": ""
+    }
+  },
+  "3": {
+    "class_type": "RH_DLSS5FrameInterpolation_AMD",
+    "inputs": {
+      "image": ["2", 0],
+      "output_fps": "2x",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "keep_audio": "on",
+      "runtime_dir": "",
+      "wine_prefix": ""
+    }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["3", 0],
+      "filename_prefix": "dlss5_amd_enhanced_interpolated"
+    }
+  }
+}

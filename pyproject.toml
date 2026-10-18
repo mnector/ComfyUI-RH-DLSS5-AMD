@@ -1,26 +1,22 @@
 [project]
-name = "ComfyUI-RH-DLSS5"
-description = "DLSS 5 Neural Rendering (NGX feature 18) enhance/upscale plus DLSS frame generation (2x/3x/4x frame-rate multiplication) for ComfyUI IMAGE and VIDEO. Windows in-process D3D12 bridge and Linux/Wine worker backends."
-version = "260927.13.20"
+name = "ComfyUI-RH-DLSS5-AMD"
+description = "DLSS 5 Neural Rendering (NGX feature 18) enhance/upscale plus temporal frame interpolation adapted for AMD GPUs on Windows (ZLUDA / ROCm / HIP bridge via OptiScaler and OpenCV DIS) for ComfyUI IMAGE and VIDEO."
+version = "1.0.0"
 license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "torch",
+    "numpy",
+    "opencv-python",
+]
 
 [project.urls]
-Repository = "https://github.com/RH-RunningHub/ComfyUI-RH-DLSS5"
-Upstream = "https://github.com/kos94ok/ComfyUI-DLSS5-NR-Linux"
-
-[project.authors]
-name = "gluttony-10"
-email = "52977964+gluttony-10@users.noreply.github.com"
-
-[project.maintainers]
-name = "gluttony-10"
-email = "52977964+gluttony-10@users.noreply.github.com"
+Repository = "https://github.com/mnector/ComfyUI-RH-DLSS5-AMD"
+Upstream = "https://github.com/RH-RunningHub/ComfyUI-RH-DLSS5"
 
 [tool.comfy]
-PublisherId = "gluttony10"
-DisplayName = "ComfyUI-RH-DLSS5"
+PublisherId = "mnector"
+DisplayName = "ComfyUI-RH-DLSS5-AMD"
 Icon = ""
 includes = ["examples", "native", "runtime/caller"]

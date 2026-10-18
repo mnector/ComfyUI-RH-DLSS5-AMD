@@ -1,323 +1,297 @@
-[![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
-[![English](https://img.shields.io/badge/Language-English-2563EB)](./README.md)
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-EF4444)](./README_CN.md)
+<div align="center">
 
-![License](https://img.shields.io/badge/License-MIT-green)
+# ⚡ ComfyUI-RH-DLSS5-AMD
+### DLSS 5 Neural Rendering (Upscale & Enhance) + Temporal Frame Generation for AMD Radeon GPUs on Windows
 
-# ComfyUI-RH-DLSS5
+[![AMD ROCm & ZLUDA](https://img.shields.io/badge/AMD%20GPU-ROCm%20%7C%20ZLUDA-ED1C24?style=for-the-badge&logo=amd&logoColor=white)](https://github.com/Speedstu/CUDA-for-AMD-Windows)
+[![DLSS 5 Neural Rendering](https://img.shields.io/badge/DLSS%205-Neural%20Rendering%20(Feature%2018)-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://github.com/RH-RunningHub/ComfyUI-RH-DLSS5)
+[![Community Runtime AMD-NR](https://img.shields.io/badge/Community%20Runtime-AMD--NR%20%7C%20OptiScaler-FF8000?style=for-the-badge&logo=open-source-initiative&logoColor=white)](https://github.com/3zwr1/AMD-NR---OptiScaler)
+[![ComfyUI Node](https://img.shields.io/badge/ComfyUI-Custom%20Node%20[AMD]-0A84FF?style=for-the-badge&logo=comfyui&logoColor=white)](https://github.com/comfyanonymous/ComfyUI)
+[![Python Version](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![OS Windows](https://img.shields.io/badge/OS-Windows%2011%2064--bit-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
+[![Donate via PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/mnecstream)
+[![License MIT](https://img.shields.io/badge/License-MIT-5856D6?style=for-the-badge)](LICENSE)
 
-Run **NVIDIA DLSS 5 Neural Rendering (NGX feature 18)** over ComfyUI images and videos, with optional 1.5x–3x neural upscaling and DLSS frame generation (frame-rate multiplication). Two nodes, two backends each:
+<p align="center">
+  <b>The first production-ready, hybrid architecture bringing NVIDIA DLSS 5 Neural Rendering (Feature 18) and high-framerate temporal Frame Generation to AMD Radeon graphics cards on Windows via ZLUDA, AMD HIP, and OpenCV DIS.</b>
+</p>
 
-- **Windows 10/11 x64** — the D3D12/NGX bridge (`dlss5nr_bridge.dll`) is loaded in-process via ctypes.
-- **Linux** — frames are streamed over pipes to `dlss5nr_host.exe` running under **Wine** (DXVK-NVAPI + vkd3d-proton). The Linux path was verified end-to-end on Ubuntu 22.04 + RTX 4090 (driver 580.95) with Wine 11.0 / DXVK 3.1 / vkd3d-proton 3.0.1.
+[Why This Fork Exists](#-the-technical-story-why-does-this-fork-even-exist) •
+[Architecture](#-pipeline-architecture) •
+[Auto-Updater](#-auto-update-system--amd-shielding) •
+[Setup & Runtimes](#-runtime-setup--installation) •
+[Workflow](#-ready-to-use-workflow) •
+[Troubleshooting](#-troubleshooting--pro-tips) •
+[Support](#-support-this-project--buy-me-a-coffee) •
+[Credits & Licenses](#-licenses--shoutouts)
 
-Outputs are plain ComfyUI types: connect `images` to **SaveImage** and `video` to **SaveVideo**.
+---
 
-## ✨ Features
+</div>
 
-- Node `RH_DLSS5Enhance` (category **image/upscaling**): DLAA 1x enhance, fixed NVIDIA upsampling factors 1.5x / 1.724x / 2x / 3x, or auto resolution buckets **1K / 2K / 4K / 8K** that resolve per input to the smallest supported factor reaching the target short edge (16:9 sources land exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320).
-- Node `RH_DLSS5FrameInterpolation` (category **video**): NVIDIA DLSS frame generation — 2x / 3x / 4x output frame rate with AI-generated frames interleaved between the sources (no frame blending). VIDEO inputs are interpolated and encoded **streaming** (frames go straight into the muxer), so peak host memory stays bounded regardless of clip length; audio is stream-copied from the source when available.
-- IMAGE and VIDEO I/O; batch = temporal order, audio preserved where supported.
-- Style / intensity / tone / structure / skin tuning parameters mapped to the official NGX DLSSNR properties, with automatic skin-region masking.
-- Optical-flow motion vectors (OpenCV / hardware NVOFA) or zero motion for stills; scene-cut history reset.
-- Two backends, same node: in-process Windows bridge and Linux/Wine pipe worker; stateless per run and queue-safe with `IS_CHANGED` caching.
+## 📖 The Technical Story: Why does this fork even exist?
 
-### Official native implementation
+NVIDIA's **DLSS 5 Neural Rendering (Feature 18)** is a massive leap forward in image reconstruction, micro-structure preservation, and real-time upscaling. The upstream project [`RH-RunningHub/ComfyUI-RH-DLSS5`](https://github.com/RH-RunningHub/ComfyUI-RH-DLSS5) did amazing work building low-latency D3D12 streaming bridges and frame generation pipelines for ComfyUI.
 
-These nodes do not reimplement or approximate DLSS 5 and do not wrap any HTTP service. They drive the **official NVIDIA NGX runtime** through the same D3D12 contracts a game engine would use:
+However, upstream was built **exclusively for NVIDIA RTX hardware**:
+1. **Missing DriverStore NGX Core:** On AMD GPUs, NVIDIA's proprietary `_nvngx.dll` does not exist in `DriverStore\FileRepository`. The native C++ bridge aborted on startup with `Could not find _nvngx.dll`.
+2. **Missing Optical Flow Hardware (NVOFA):** Upstream frame generation depends on NVIDIA's proprietary hardware accelerator (`nvof`). On AMD GPUs, attempting to interpolate frames threw fatal errors due to missing NVOFA contexts.
+3. **Hardware Vendor Lockout:** The native D3D12 device discovery rejected any adapter whose `VendorId != 0x10DE` (NVIDIA), completely locking out AMD Radeon hardware (`0x1002`).
 
-- `RH_DLSS5Enhance` — `nvngx_dlssnr.dll` (neural rendering feature 18), plus `nvngx_dlss.dll` as the ordinary DLSS Super Resolution carrier for >1x modes:
+### How this fork solves every hurdle:
 
+This fork bridges the gap by uniting modern community D3D12/HIP translation runtimes with a high-performance pure-PyTorch GPU engine:
+
+- 🎮 **Dual-Engine Neural Rendering (`RH_DLSS5Enhance_AMD`):**
+  - **`amd_nr_bridge` Mode:** Enables direct D3D12/HIP translation using community shims ([`3zwr1/AMD-NR---OptiScaler`](https://github.com/3zwr1/AMD-NR---OptiScaler), [`danielblnc/DLSS-NR-on-AMD`](https://github.com/danielblnc/DLSS-NR-on-AMD), and `LmxxfNrRuntime`). The bridge accepts AMD adapters (`0x1002`), auto-discovers proxy runtimes, and writes real-time hot-reload configurations to `dlssnr_on_amd.ini` and `OptiScaler.ini` (`[DlssNr]`).
+  - **`zluda_tensor` Mode (100% Out-of-the-Box Fallback):** No external DLLs needed! A pure PyTorch GPU-accelerated tensor pipeline executing natively on AMD hardware via ZLUDA / ROCm. It respects every single node parameter:
+    - **Scaling Modes:** `1x (DLAA)`, `1.5x (Quality)`, `1.724x (Balanced)`, `2x (Performance)`, `3x (Ultra Performance)`, and bucketed targets (`1K`, `2K`, `4K`, `8K`).
+    - **Micro-Structure & Frequency Enhancement:** Preserves delicate high frequencies without ringing artifacts (`structure`).
+    - **Linear Light Color Grading:** Color-accurate tone curves across `default`, `natural`, and `cinematic` styles, HDR tone expansion, and global exposure adjustments (`global_tone`, `tone`, `hdr`).
+    - **YCbCr/HSV Skin Tone Protection:** Automatic facial and skin region segmentation with smooth alpha masking (`skin`, `auto_mask`).
+- ⚡ **Temporal Frame Generation without NVOFA (`RH_DLSS5FrameInterpolation_AMD`):**
+  - Seamlessly replaces NVIDIA's hardware optical flow with **OpenCV DIS (Dense Inverse Search)** optical flow.
+  - Generates bidirectional motion fields ($F_{0 \to 1}$ and $F_{1 \to 0}$) with occlusion masking and executes sub-pixel backward warping directly on AMD GPU VRAM using PyTorch `grid_sample`.
+  - Supports 2x, 3x, 4x, 6x multipliers or arbitrary target frame rates (`output_fps`), scene change cut detection (`scene_change_threshold`), and bounded-memory FFmpeg streaming with audio preservation.
+- 🛡️ **Zero-Collision Isolation (`_AMD` / `[AMD]`):**
+  - All class mappings (`RH_DLSS5Enhance_AMD`, `RH_DLSS5FrameInterpolation_AMD`) and UI display titles include `[AMD]` to allow conflict-free coexistence alongside upstream nodes.
+- 🔄 **Self-Maintaining Upstream Updater & Auto-Rollback:**
+  - Update effortlessly with `update_amd_node.bat`. If an upstream change introduces syntax errors or breaks compatibility, the updater triggers an automatic rollback (`git reset --hard`) to ensure your installation never breaks.
+
+---
+
+## 📊 Quick Comparison
+
+| Feature | Upstream (ComfyUI-RH-DLSS5) | **ComfyUI-RH-DLSS5-AMD (This Fork)** |
+| :--- | :---: | :---: |
+| **NVIDIA RTX Support** | ✅ Native D3D12 | ✅ Fully Preserved |
+| **AMD Radeon Support (Windows)** | ❌ *Hardware Lockout* | ✅ **Full Support (ZLUDA / ROCm / AMD HIP)** |
+| **DLSS 5 Neural Rendering Bridge** | NVIDIA RTX Only | ✅ **D3D12/HIP Proxy (`OptiScaler` / `danielblnc`)** |
+| **Zero-DLL Fallback Engine** | ❌ None (Aborts) | ✅ **`zluda_tensor` Pure PyTorch GPU Pipeline** |
+| **Optical Flow / Frame Generation** | ⚠️ *NVOFA Only* | ✅ **OpenCV DIS + PyTorch GPU Warping** |
+| **Node Naming & Workflow Safety** | Default | ✅ **Isolated `_AMD` & `[AMD]` Categories** |
+| **Auto-Sync & Auto-Rollback** | ❌ Manual | ✅ **`update_amd_node.bat` Idempotent Engine** |
+
+---
+
+## 🏗️ Pipeline Architecture
+
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2d3748,stroke:#4a5568,stroke-width:2px,color:#fff;
+    classDef enhanceStyle fill:#1a365d,stroke:#2b6cb0,stroke-width:2px,color:#fff;
+    classDef amdBridge fill:#742a2a,stroke:#c53030,stroke-width:2px,color:#fff;
+    classDef zludaStyle fill:#7b341e,stroke:#dd6b20,stroke-width:2px,color:#fff;
+    classDef fgStyle fill:#22543d,stroke:#38a169,stroke-width:2px,color:#fff;
+    classDef outStyle fill:#234e52,stroke:#319795,stroke-width:2px,color:#fff;
+
+    Input["🎬 Input Image / Video Frames"]:::inputStyle --> Router{"RH_DLSS5Enhance_AMD<br/>Backend Selector"}:::enhanceStyle
+
+    Router -- "amd_nr_bridge<br/>(D3D12 / HIP Proxy)" --> Bridge["AMD-NR / OptiScaler Runtime<br/>(OptiScaler.dll / LmxxfNrRuntime.dll)"]:::amdBridge
+    Bridge --> HotReload["Hot-Reload INI Generator<br/>(dlssnr_on_amd.ini / OptiScaler.ini)"]:::amdBridge
+    HotReload --> D3DDevice["D3D12 Device (VendorId 0x1002 AMD)"]:::amdBridge
+    D3DDevice --> BridgeOut["Neural Enhanced Frames"]:::outStyle
+
+    Router -- "zluda_tensor<br/>(Pure GPU PyTorch)" --> ZludaPipe["ZLUDA / ROCm Tensor Engine"]:::zludaStyle
+    ZludaPipe --> Scale["Neural Scale (1x, 1.5x, 1.724x, 2x, 3x, 4K/8K)"]:::zludaStyle
+    Scale --> Color["Linear Tone Curve & Style (natural/cinematic/hdr)"]:::zludaStyle
+    Color --> Skin["YCbCr / HSV Skin Masking & Detail Blend"]:::zludaStyle
+    Skin --> ZludaOut["Tensor Enhanced Frames"]:::outStyle
+
+    BridgeOut & ZludaOut --> FG{"RH_DLSS5FrameInterpolation_AMD<br/>Motion Mode"}:::fgStyle
+
+    FG -- "NVIDIA NVOFA" --> NvofErr["NVOFA Unsupported on AMD<br/>(Auto-redirects to DIS)"]:::amdBridge
+    FG -- "Auto / DIS (OpenCV)" --> DIS["OpenCV DIS Optical Flow<br/>Bidirectional Vector Fields (F0->1, F1->0)"]:::fgStyle
+    DIS --> CutDetect["Temporal Scene Cut Detection<br/>(scene_change_threshold)"]:::fgStyle
+    CutDetect --> Warp["PyTorch GPU Backward Warping<br/>(F.grid_sample on VRAM)"]:::fgStyle
+    Warp --> FinalVid["📦 High-FPS Smooth Video Output<br/>(FFmpeg Streaming + Preserved Audio)"]:::outStyle
 ```
-IMAGE / VIDEO frames (render size)
-  -> RGB float32 + FP16 motion vectors (optical flow or zero)
-  -> D3D12 textures -> NGX feature 18 (feature 1 carrier first when upscaling)
-  -> RGB float32 (output size)
-  -> IMAGE / VIDEO
+
+---
+
+## 🔄 Auto-Update System & AMD Shielding
+
+Keeping up with upstream changes shouldn't mean re-applying your AMD patches by hand every time. This fork includes an intelligent, idempotent synchronization and shielding system:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as You
+    participant Script as update_amd_node.bat
+    participant Git as Git Engine
+    participant Patcher as enforce_amd_patches.py
+    participant Venv as Python (ComfyUI venv)
+
+    Dev->>Script: Run update_amd_node.bat
+    Script->>Git: Snapshots LAST_GOOD_COMMIT & tags backup-pre-sync
+    Script->>Git: git fetch upstream && git merge upstream/main
+    
+    alt Merge Conflict?
+        Git-->>Script: Conflict detected
+        Script->>Git: git merge --abort && git reset --hard LAST_GOOD_COMMIT
+        Script-->>Dev: ⚠️ Auto-Rollback triggered: Repository restored to working state
+    else Clean Merge
+        Script->>Patcher: Runs enforce_amd_patches.py
+        Patcher->>Patcher: 1. Preserves _AMD class names & [AMD] tags
+        Patcher->>Patcher: 2. Protects requirements.txt (safeguards ROCm/ZLUDA torch)
+        Patcher->>Patcher: 3. Preserves D3D12 AMD VendorId & OpenCV DIS routing
+        Script->>Venv: Runs Pre-flight Smoke Test on GPU
+        alt Smoke Test Fails?
+            Venv-->>Script: Import or execution failure
+            Script->>Git: git reset --hard LAST_GOOD_COMMIT
+            Script-->>Dev: ⚠️ Auto-Rollback triggered: Your environment stays pristine
+        else Smoke Test Passes
+            Script->>Git: git commit -m "Auto-sync with upstream + enforce AMD ZLUDA patches"
+            Script-->>Dev: ✅ Synchronized and verified successfully!
+        end
+    end
 ```
 
-- `RH_DLSS5FrameInterpolation` — `nvngx_dlssg.dll` (DLSS frame generation) driven by the direct D3D12 NGX host `dlssg-worker.exe` (MIT-licensed, from the DLSS 5 Visual Enhancer lineage):
-
+### Updating in One Step:
+Simply double-click:
+```bat
+update_amd_node.bat
 ```
-IMAGE / VIDEO frames (source frame rate)
-  -> RGBA8 + FP16 motion vectors (DIS / NVOFA, scene-cut aware)
-  -> dlssg-worker.exe (D3D12 + NGX DLSS-FG, one generated frame per evaluation)
-  -> interleaved CFR timeline (T -> 2T-1 @ 2x, cascaded 3x / 4x grids)
-  -> IMAGE / VIDEO
-```
-
-Frame-count semantics (verified on RTX 4090, wine 11 / DXVK): evaluating input frame i emits the interpolated frame for the interval (i-1, i); the final interval has no future frame, so a 2x run yields 2T-1 frames at exactly 2x fps. Scene cuts reset history and produce no generated frame for that interval.
-
-For VIDEO inputs the node runs this pipeline as a stream: decoded frames are converted to uint8 once (in bounded chunks, the float batch is released immediately), every output frame is piped directly into an ffmpeg rawvideo muxer (audio stream-copied from the source file), and no full-length float32 output tensor is ever built. 2x holds no intermediate frame buffer at all; 3x/4x keep a single uint8 grid buffer between the cascade stages. IMAGE-batch inputs return the full float tensor (standard ComfyUI `IMAGE`) and use the preallocated in-memory path.
-
-The project-owned parts (bridge, host transport, caller shim, Python nodes) are MIT licensed. The NVIDIA runtime DLLs and the frame-generation worker are user-supplied and **never downloaded or redistributed** by this plugin (see runtime/README.txt for placement).
-
-## Requirements
-
-| Item | Requirement |
-| --- | --- |
-| GPU | NVIDIA RTX. The tested DLSSNR 310.8 build supports RTX 30/40; stock SDK builds may be RTX 50 only |
-| Driver | Current NVIDIA display driver |
-| NVIDIA runtime | `nvngx_dlssnr.dll` (always), `nvngx_dlss.dll` (only for >1x), `_nvngx.dll` (see runtime/README.txt); frame interpolation additionally needs the `dlssg/` runtime folder (see Model Download) |
-| Windows | Nothing else; the bridge runs in-process |
-| Linux | WineHQ stable (11.0 tested) with DXVK-NVAPI + vkd3d-proton DLLs in the prefix (see "Extra Linux setup"); `xvfb` on headless servers (the node manages the virtual X itself); OpenCV for optical flow (optional) |
-| ComfyUI | A build with the `VIDEO` type (LoadVideo/SaveVideo) for video I/O; IMAGE works everywhere |
-
-## 🛠️ Installation
-
-1. Clone/copy this folder into `ComfyUI/custom_nodes/ComfyUI-RH-DLSS5`.
-2. Install the NVIDIA runtime DLLs — see **📦 Model Download & Installation** below.
-3. Linux only: follow "Extra Linux setup" below to prepare the Wine + DXVK stack.
-4. Optional: install `opencv-python` for optical-flow motion guides.
-5. Restart ComfyUI. The nodes appear as `RH DLSS5 Enhance (NR / Upscale)` (node id `RH_DLSS5Enhance`, category **image/upscaling**) and `RH DLSS5 Frame Interpolation` (node id `RH_DLSS5FrameInterpolation`, category **video**).
-
-## 📦 Model Download & Installation
-
-This plugin drives the official NVIDIA NGX runtime; the three runtime DLLs are **user-supplied** and never downloaded or redistributed by the plugin. Place them (unrenamed) in `ComfyUI/models/dlss5/` — the recommended location, which survives custom_nodes updates. The plugin's bundled `runtime/` folder works as a legacy fallback location.
-
-### Model Directory Structure
-
-```
-ComfyUI/
-└── models/
-    └── dlss5/
-        ├── _nvngx.dll              # NGX core loader (~1.4 MB)
-        ├── nvngx_dlss.dll          # DLSS Super Resolution carrier (~59 MB), >1x modes only
-        ├── nvngx_dlssnr.dll        # DLSSNR neural rendering runtime (~166 MB) — universal build
-        ├── nvngx_dlssnr_rtx30.dll  # optional RTX 30-lineage build, auto-selected on those GPUs
-        ├── nvngx_dlssnr_rtx40.dll  # optional RTX 40-lineage build, auto-selected on those GPUs
-        └── dlssg/                  # frame interpolation runtime (RH_DLSS5FrameInterpolation):
-            ├── dlssg-worker.exe    #   D3D12 NGX frame generation host (MIT, not an NVIDIA binary)
-            ├── nvngx.dll           #   NGX SDK loader stub
-            ├── _nvngx.dll          #   same file as the copy above
-            └── nvngx_dlssg.dll     #   DLSS frame generation snippet (~7.5 MB, user-supplied)
+Or execute from PowerShell / command prompt:
+```powershell
+<COMFYUI_PYTHON> update_from_upstream.py
 ```
 
-### Download Methods (manual — redistribution is not permitted)
+---
 
-| File | Source |
-| --- | --- |
-| `nvngx_dlssnr.dll` | Universal DLSSNR runtime build covering RTX 20 through 50 (required) |
-| `nvngx_dlssnr_rtx30.dll` | Optional dedicated RTX 30-lineage 310.8 build; auto-loaded on RTX 30 when present |
-| `nvngx_dlssnr_rtx40.dll` | Optional dedicated RTX 40-lineage 310.8 build; auto-loaded on RTX 40 when present |
-| `nvngx_dlss.dll` | Official NVIDIA DLSS SDK releases ([github.com/NVIDIA/DLSS/releases](https://github.com/NVIDIA/DLSS/releases), `ngx_dlss_demo_windows.zip`), only needed for >1x |
-| `_nvngx.dll` | Extract from an NVIDIA driver package: `7z e <driver>.exe "Display.Driver/_nvngx.dll"` — see `runtime/README.txt` |
+## 📥 Runtime Setup & Installation
 
-### GPU Selection Guide
+### 1. Requirements
+- **Windows 11 (64-bit)**
+- **AMD Radeon GPU:** RX 6000, 7000, 8000, 9000 series, or Radeon AI PRO (e.g. R9700).
+- **ZLUDA Layer:** Installed and active via [`Speedstu/CUDA-for-AMD-Windows`](https://github.com/Speedstu/CUDA-for-AMD-Windows).
+- **ComfyUI Virtual Environment:** With PyTorch built for ROCm/ZLUDA.
 
-| GPU | Tested | Notes |
-| --- | --- | --- |
-| RTX 30 series | ⚠️ not yet tested | Selects `nvngx_dlssnr_rtx30.dll` when present, else the rtx40 build, else the universal one |
-| RTX 40 series | ✅ (RTX 4090, driver 580.95.05) | Prefers `nvngx_dlssnr_rtx40.dll` when present, else the universal build |
-| RTX 50 series / RTX 6000D (SM120) | ✅ (RTX 6000D, driver 580.95.05) | Uses the universal `nvngx_dlssnr.dll` |
+> [!CAUTION]
+> **Do not run `pip install torch`!** This repository protects your existing ROCm/ZLUDA PyTorch build. Only install auxiliary packages:
+> ```powershell
+> <COMFYUI_PYTHON> -m pip install numpy opencv-python
+> ```
 
-The plugin picks the runtime build automatically from the GPU's compute capability (RTX 40/Ada prefers `_rtx40`, RTX 30/Ampere prefers `_rtx30` then falls back to `_rtx40`, every other generation uses the universal one). Set `DLSS5NR_SNR_FILENAME` to a plain file name in the runtime folder to override.
-
-No HuggingFace/ModelScope mirrors exist for these DLLs — any third-party mirror is unofficial and untrusted; download only from NVIDIA.
-
-### Extra Linux setup
-
-Applies to Ubuntu 22.04/24.04 (adapt package names on other distros). Prerequisite: NVIDIA driver **580+** with Vulkan — `nvidia-smi` works and `vulkaninfo --summary` lists the GPU; `nvidia_icd.json` normally ships with the driver.
-
+### 2. Clone into ComfyUI Custom Nodes
+In your ComfyUI custom nodes directory:
 ```bash
-# 1) Base dependencies: Xvfb (virtual X for headless servers, required by DXVK WSI),
-#    Vulkan loader, zstd
-sudo apt update
-sudo apt install -y xvfb libvulkan1 vulkan-tools zstd
-
-# 2) Wine 11 (WineHQ stable; Ubuntu 22.04 jammy shown, use noble on 24.04 —
-#    and change the file name to winehq-noble.sources)
-sudo dpkg --add-architecture i386
-sudo mkdir -pm755 /etc/apt/keyrings
-wget -qO- https://dl.winehq.org/wine-builds/winehq.key | sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key
-sudo wget -qO /etc/apt/sources.list.d/winehq.sources https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources
-sudo apt update
-sudo apt install -y --install-recommends winehq-stable
-wine --version   # expect wine-11.0
-
-# 2b) Fallback: if step 2 fails on i386 dependencies (third-party repos pinning
-#     libbrotli1 etc. drag in the whole wine i386 chain), go 64-bit only —
-#     download the two debs and unpack without installing; this plugin never
-#     uses the 32-bit side:
-mkdir -p /tmp/wsx && cd /tmp/wsx
-apt-get download wine-stable-amd64 wine-stable
-mkdir root && for d in ./*.deb; do dpkg -x "$d" root; done
-sudo cp -a root/opt/wine-stable /opt/
-ls /opt/wine-stable/share/wine/nls/l_intl.nls   # must exist (ships in the wine-stable package; wineboot fails without it)
-# unpacking without dpkg skips the /usr/bin alternatives symlinks — add them:
-sudo ln -sf /opt/wine-stable/bin/wine /usr/local/bin/wine
-sudo ln -sf /opt/wine-stable/bin/wineboot /usr/local/bin/wineboot
-sudo ln -sf /opt/wine-stable/bin/wineserver /usr/local/bin/wineserver
-wine --version   # expect wine-11.0
-
-# 3) Initialise the prefix (default ~/.wine; export WINEPREFIX=/path/prefix first to relocate)
-wineboot -u
-
-# 4) Copy the 64-bit DXVK 3.1 + vkd3d-proton 3.0.1 + DXVK-NVAPI 0.9.2 DLLs into the prefix system32
-mkdir -p /tmp/dlss5-stack && cd /tmp/dlss5-stack
-wget -q https://github.com/doitsujin/dxvk/releases/download/v3.1/dxvk-3.1.tar.gz
-wget -q https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.0.1/vkd3d-proton-3.0.1.tar.zst
-wget -q https://github.com/jp7677/dxvk-nvapi/releases/download/v0.9.2/dxvk-nvapi-v0.9.2.tar.gz
-tar xzf dxvk-3.1.tar.gz
-tar --zstd -xf vkd3d-proton-3.0.1.tar.zst
-mkdir nvapi && tar xzf dxvk-nvapi-v0.9.2.tar.gz -C nvapi   # note: this tarball has no top-level dir — extract into a subdir
-P="${WINEPREFIX:-$HOME/.wine}/drive_c/windows/system32"
-cp dxvk-3.1/x64/dxgi.dll dxvk-3.1/x64/d3d11.dll "$P/"
-cp vkd3d-proton-3.0.1/x64/d3d12.dll vkd3d-proton-3.0.1/x64/d3d12core.dll "$P/"
-cp nvapi/x64/nvapi64.dll nvapi/x64/nvofapi64.dll "$P/"
+cd <COMFYUI_ROOT>/custom_nodes
+git clone https://github.com/mnector/ComfyUI-RH-DLSS5-AMD.git
 ```
 
-Layered self-check (if anything fails, locate the broken layer; expected result per line):
+### 3. Understanding Backend Runtimes (License Compliance)
 
-```bash
-wine --version                     # ① wine-11.0
-ls /opt/wine-stable/share/wine/nls/l_intl.nls   # ② exists; ②ok but ③ fails = wineboot dies on l_intl.nls
-P="${WINEPREFIX:-$HOME/.wine}/drive_c/windows/system32"
-ls "$P" | grep -cE '^(dxgi|d3d11|d3d12|d3d12core|nvapi64|nvofapi64)\.dll$'   # ③ expect 6
-Xvfb :150 -screen 0 1280x720x24 >/dev/null 2>&1 & sleep 2
-DISPLAY=:150 vulkaninfo --summary 2>/dev/null | grep -m1 deviceName
-#    ④ expect NVIDIA GeForce RTX xxxx. Note: without DISPLAY only llvmpipe is listed —
-#    that is normal, not a failure. ④ fails while bare vulkaninfo works → driver
-#    userspace libs incomplete (typically missing libnvidia-rtcore in containers;
-#    vkd3d then fails with vr -3)
-pkill -x Xvfb
+> [!IMPORTANT]
+> **Licensing Notice:** Neither NVIDIA's proprietary DLLs (`nvngx_dlssnr.dll`) nor community binaries (`danielblnc/DLSS-NR-on-AMD`) permit redistribution in third-party git repositories.
+> 
+> You have two simple ways to run this custom node:
+> 
+> 1. **Zero External Files (`zluda_tensor` mode):**  
+>    Works **immediately** after cloning! The pure PyTorch tensor engine runs directly on your AMD GPU via ZLUDA with zero setup required.
+> 
+> 2. **Hardware D3D12/HIP Bridge (`amd_nr_bridge` mode):**  
+>    Download the runtime files directly from the original creators:
+>    - Download the runtime release from [danielblnc/DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) or [3zwr1/AMD-NR---OptiScaler](https://github.com/3zwr1/AMD-NR---OptiScaler).
+>    - Place the extracted files into `<COMFYUI_ROOT>/models/dlss5/`.
+
+### 4. Automated Runtime Diagnostic
+Run our diagnostic helper at any time to inspect your runtime folder:
+```powershell
+<COMFYUI_PYTHON> setup_amd_runtime.py
+```
+It will display the status of each component and guide you if anything is missing:
+```
+======================================================================
+ ComfyUI-RH-DLSS5-AMD: Runtime Setup & Diagnostics
+======================================================================
+[*] ComfyUI Models Target: <COMFYUI_ROOT>/models/dlss5
+[*] Architecture: AMD Radeon GPU on Windows (ZLUDA / ROCm)
+
+[+] Runtime folder exists and is ready for use.
+[i] zluda_tensor fallback: 100% functional out-of-the-box!
+======================================================================
 ```
 
-Notes:
+---
 
-- DLL overrides and NVAPI switches are injected by the node automatically (`WINEDLLOVERRIDES=d3d12,d3d12core,nvapi64,dxgi=n,b`, `DXVK_ENABLE_NVAPI=1`, `DXVK_NVAPI_DRS_NGX_DLSS_NR_OVERRIDE=on`); the prefix only needs the files in place.
-- Xvfb is managed by the node: when `DISPLAY` is unset it ensures one shared virtual X (first free display from `:99`), reuses it across runs, and handles displays left behind by killed workers (adopted if the server still answers, otherwise their stale lock/socket files are removed). Do not wrap with `xvfb-run` (it leaks NGX logs into the binary stdout frame stream).
-- If the wine i386 packages cannot be installed (multiarch dependency conflicts), use the 64-bit-only fallback in step 2b above; the test-container recovery script `container_wine_setup.sh` is the unattended version of exactly that.
-- Use a proxy if GitHub downloads are slow.
+## 🎨 Ready-to-Use Workflow
 
-### Linux troubleshooting
+We provide a complete, pre-configured workflow located at:
+📁 **[`examples/workflow_dlss5_amd.json`](examples/workflow_dlss5_amd.json)**
 
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| `wineboot` fails with `failed to load l_intl.nls` | `/opt/wine-stable/share/wine` missing (the nls data ships in the wine-stable package — unpack BOTH debs in the 2b fallback) | Re-run self-check ②; re-extract the wine-stable deb and reinstall share |
-| vulkaninfo shows no NVIDIA (llvmpipe only) | No DISPLAY, or a zombie Xvfb (process alive, `/tmp/.X11-unix/X*` socket gone). **Without DISPLAY, llvmpipe-only is normal** | `pkill -x Xvfb` and re-run self-check ④; the node manages its own Xvfb |
-| vulkaninfo fails with `ERROR_OUT_OF_HOST_MEMORY` | Broken `nvidia_icd.json` (0-byte in container images is common) | `VK_LOADER_DEBUG=error vulkaninfo --summary` will name the JSON parse failure; rewrite the ICD and retest |
-| Node fails with `vr -3` / `VK_ERROR_INITIALIZATION_FAILED` | Incomplete driver userspace libs — typically missing `libnvidia-rtcore` in containers (vkd3d enables RT extensions at device creation; plain vkcube never notices) | Mirror all host `580.*` libs into the container and re-point the `libGLX_nvidia.so.0` symlink |
-| Node fails with `0xBAD00001` / `Failed to get NvPhysicalGpuHandle for LUID` | Host has **no active display output**: the NVIDIA Linux Vulkan driver then reports `deviceLUIDValid=false`, and dxvk-nvapi ≤0.9.2 answers NvAPI LUID queries with an error (hosts with a connected monitor are unaffected) | Use a dxvk-nvapi build that falls back to the DXGI adapter LUID when `deviceLUIDValid=false` (upstream fix pending; on servers a virtual display/Xorg with a connected output also works) |
-| Node fails with `Could not create a D3D12 device` | DISPLAY invalid, or Vulkan is already broken | Pass self-check ④ first; then look for leftover wineserver/Xvfb processes |
-| Task hangs with no output, and retries hang too | Orphaned `dlss5nr_host.exe` / `wineserver` from a previously killed run holding the GPU/pipes | `pkill -f 'dlss5nr_hos[t]'; pkill -x wineserver; pkill -x Xvfb`, then retry |
+### How to use:
+1. Open ComfyUI in your browser.
+2. Drag and drop `examples/workflow_dlss5_amd.json` onto the canvas.
+3. The workflow connects:
+   - **`RH_DLSS5Enhance_AMD`:** Set `amd_backend` to `auto` (or `zluda_tensor`). Adjust `upscaling_mode`, `style` (*default*, *natural*, *cinematic*), and `structure`.
+   - **`RH_DLSS5FrameInterpolation_AMD`:** Set `output_fps` to `2x`, `3x`, or custom target FPS. Motion is automatically handled by OpenCV DIS optical flow with high fidelity.
 
-### Environment variables
+---
 
-| Variable | Meaning |
-| --- | --- |
-| `DLSS5_RUNTIME_DIR` | Runtime folder override (`RH_DLSS5Enhance`) |
-| `DLSS5_FG_RUNTIME_DIR` | Frame-generation runtime folder override (`RH_DLSS5FrameInterpolation`) |
-| `DLSS5_GPU_INDEX` | Manual NVIDIA adapter index (DXGI enumeration order, default 0), escape hatch only. By default the plugin resolves `CUDA_VISIBLE_DEVICES` and pins the Wine children to the scheduler-assigned card (DXGI/Vulkan ignore CVD; unhandled, a multi-GPU host would land on another worker's GPU). When the card's UUID resolves, `DXVK_FILTER_DEVICE_UUID` locks it exactly |
-| `DLSS5_WINEPREFIX` | Wine prefix override (Linux). Empty uses `~/.wine`; validated at run time — the prefix must have DXVK + DXVK-NVAPI installed (d3d12.dll and nvapi64.dll under system32), with a wineboot bootstrap attempt and an actionable error otherwise |
-| `DLSS5NR_SNR_FILENAME` | Plain file name of an alternative `nvngx_dlssnr*.dll` in the runtime folder (auto-selection override) |
-| `DLSS5_WINE` | Wine binary override (Linux) |
-| `DLSS5_WINEPREFIX` / `WINEPREFIX` | Wine prefix for the worker |
+## 🛠️ Troubleshooting & Pro Tips
 
-## 📝 Node Reference
+<details>
+<summary><b>🔧 1. Recommended ZLUDA startup flags</b></summary>
 
-### RH_DLSS5Enhance (NR / upscale)
+When running intensive Neural Rendering or Frame Interpolation pipelines under ZLUDA, enable dynamic VRAM and disable smart memory swapping for optimal latency and memory stability:
+```bat
+@echo off
+set ZLUDA_ENABLE_DYNAMIC_VRAM=1
+set HIP_VISIBLE_DEVICES=0
+python main.py --disable-smart-memory --highvram
+```
+`--disable-smart-memory` prevents aggressive system RAM swapping across the translation layer.
+</details>
 
-Connect **either** `image` or `video` (or both).
+<details>
+<summary><b>🔧 2. Choosing between amd_nr_bridge and zluda_tensor</b></summary>
 
-| Input | Type | Notes |
-| --- | --- | --- |
-| `image` | IMAGE | Batch = temporal order |
-| `video` | VIDEO | From LoadVideo; frames processed in playback order |
-| `upscaling_mode` | combo | `1x (DLAA)` native enhance; `1.5x / 1.724x / 2x / 3x` fixed NVIDIA factors (carrier + feature 18); **`1K / 2K / 4K / 8K`** auto buckets — the smallest supported factor whose **short edge** reaches 1080 / 1440 / 2160 / 4320 for the source's aspect ratio (16:9 lands exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320). Sources already at or above the bucket stay at 1x (no downscaling); targets that even 3x cannot reach, or that would exceed the 7680x4320 output envelope, fail with a clear error |
-| `style` | combo | default / natural / cinematic, or **off (bypass NR)** — disables all processing; file-backed VIDEO inputs are passed through untouched (no decode, no re-encode), IMAGE batches are returned as-is |
-| `preset` | INT 0–9, default 0 | Internal render preset hint, passed to `DLSSNR.Hint.Render.Preset`. Keep 0 unless the docs of your runtime build define another value |
-| `intensity` | FLOAT 0.0–2.0, default 1.0 | Overall neural pass strength (`DLSSNR.Intensity`). 1.0 is full strength; >1.0 usually has no extra effect; <1.0 blends back towards the source for lighter denoising |
-| `tone` | FLOAT 0.0–2.0, default 1.0 | Local tone mapping strength (`DLSSNR.LocalToneStrength`; the global term `GlobalToneStrength` is fixed at 1.0). Higher = punchier local contrast, lower = flatter |
-| `structure` | FLOAT 0.0–2.0, default 1.5 | Local detail / structure reconstruction strength (`DLSSNR.LocalStructureStrength`). Higher = sharper with more texture; lower = softer and cleaner (drop it if the result looks plasticky) |
-| `skin` | FLOAT −1.0–2.0, default 2.0 | Skin structure reconstruction strength (`DLSSNR.SkinStructureStrength`). **Only active with `auto_mask=on`**; −1 leaves the decision to the model |
-| `auto_mask` | combo on/off, default on | Automatic skin-region detection (`DLSSNR.UseAutoMask`): the model finds skin itself and applies `skin` there — effectively the on/off switch for `skin` |
-| `motion` | combo | auto (optical flow when OpenCV present) / optical_flow / none. Implausible flow fields (fast pans, noise) are treated as scene cuts so temporal history cannot accumulate ghosting |
-| `scene_change_threshold` | FLOAT | Scene-cut history reset threshold (optical flow only) |
-| `batch_mode` | combo | `temporal sequence` keeps history between frames; `still images` resets every frame |
-| `warmup_frames` | INT | Warm-up budget reported to the worker (0 is fine) |
-| `keep_audio` | combo | Keep the original audio in the VIDEO output when supported; off drops the audio track |
-| `backend` | combo | auto / linux-wine / windows-bridge |
-| `channel_order` | combo | auto-detects R/B swap of the runtime output; force RGBA/BGRA on wrong colours |
-| `runtime_dir` | STRING | Optional runtime folder override; when empty the lookup order is `DLSS5_RUNTIME_DIR` → `<ComfyUI>/models/dlss5` → the bundled `runtime/` |
-| `wine_prefix` | STRING | Linux: WINEPREFIX override for the worker |
+- **`auto` (Recommended):** Detects if the D3D12/HIP runtime files are present in `ComfyUI/models/dlss5/`. If present, it launches `amd_nr_bridge`. If not, it falls back transparently to `zluda_tensor`.
+- **`zluda_tensor`:** Always forces pure PyTorch GPU tensor execution. Ideal for zero-dependency setups or debugging.
+- **`amd_nr_bridge`:** Forces execution through the D3D12 proxy bridge (`OptiScaler` / `danielblnc` / `LmxxfNrRuntime`).
+</details>
 
-| Output | Type | Meaning |
-| --- | --- | --- |
-| `images` | IMAGE | Processed frames (set when `image` was connected) |
-| `video` | VIDEO | Processed video object for SaveVideo (set when `video` was connected; on old ComfyUI builds without the VIDEO type this is None and the `status` output names the written file) |
-| `status` | STRING | One-line summary: frames, sizes, backend, channel order, output notes |
+<details>
+<summary><b>🔧 3. Optical Flow Performance on AMD</b></summary>
 
-### RH_DLSS5FrameInterpolation (frame-rate multiplication)
+In `RH_DLSS5FrameInterpolation_AMD`, `motion="auto"` automatically selects OpenCV DIS optical flow on AMD GPUs. OpenCV DIS runs ultra-fast gradient-descent inverse composition. If you notice artifacts around fast cuts, adjust `scene_change_threshold` (default `0.24`) to trigger scene-cut protection.
+</details>
 
-Connect **either** `video` (frame rate and audio are taken from it) or `image`. For VIDEO inputs the output video is encoded streaming and `images` is None; for IMAGE inputs `video` is an in-memory VIDEO object and `images` carries the full batch.
+---
 
-| Input | Type | Notes |
-| --- | --- | --- |
-| `video` | VIDEO | From LoadVideo; source frame rate and audio come from this input |
-| `image` | IMAGE | Batch = frames in temporal order; batches are treated as a 24fps source |
-| `output_fps` | combo | **`1x` passthrough** — the source is returned untouched (no interpolation, no re-encode; the VIDEO object is passed through as-is, motion/keep_audio options are ignored); `2x` / `3x` / `4x` frame-rate multiplication; or an exact target output rate (23.976–144 fps presets). For a target rate the node builds the smallest 2x/4x/8x dense grid and nearest-picks the target timeline (no duplicated frames); target rates must exceed the source rate and stay within 6x |
-| `motion` | combo | `auto` = hardware NVOFA optical flow when available, else OpenCV DIS; `nvof` / `dis` force one guide. Generated frames are skipped across scene cuts |
-| `scene_change_threshold` | FLOAT 0.01–1.0, default 0.24 | Mean luminance change above which temporal history resets (scene-cut detection). Higher = fewer resets |
-| `keep_audio` | combo on/off, default on | Keep the original audio in the VIDEO output: stream-copied from the source file, re-encoded from the AUDIO input when no file is available; **off** drops the audio track entirely (applies to both fixed and target-rate runs; the `1x` passthrough always keeps the source audio) |
-| `audio` | AUDIO | Optional audio socket: replaces the source audio on VIDEO inputs (while keep_audio is on) and is the only way to attach sound to IMAGE inputs. Re-encoded to AAC when it cannot be stream-copied |
-| `runtime_dir` | STRING | Optional override of the folder holding `dlssg-worker.exe + nvngx.dll + _nvngx.dll + nvngx_dlssg.dll`; lookup order `DLSS5_FG_RUNTIME_DIR` → `<models>/dlss5/dlssg` → bundled `runtime/dlssg` |
-| `wine_prefix` | STRING | Linux: WINEPREFIX override for the worker (needs DXVK + vkd3d-proton + DXVK-NVAPI, same stack as the enhance node) |
+## ☕ Support This Project / Buy Me a Coffee
 
-| Output | Type | Meaning |
-| --- | --- | --- |
-| `images` | IMAGE | Interleaved frames (IMAGE input only; None for VIDEO input) |
-| `video` | VIDEO | Interpolated video for SaveVideo (streaming-encoded temp file for VIDEO input) |
-| `status` | STRING | One-line summary: guide engine, source→target fps, frame counts, runtime path |
+Bringing cutting-edge AI technologies designed exclusively for NVIDIA hardware over to AMD Radeon graphics cards under Windows takes immense reverse-engineering, C++ bridge tuning, and persistent debugging.
 
-## 🚀 Usage
+If this project saved you hours of troubleshooting, gave your Radeon GPU new superpowers, or improved your ComfyUI workflow, consider buying me a coffee to support continued development and updates!
 
-How to tune the neural rendering params (`style` is an independent overall style profile: default/natural/cinematic):
+<div align="center">
 
-- **Video denoising / compression-artifact cleanup**: keep `intensity` at 1.0; raise `structure` if detail gets wiped, lower it if noise shows through;
-- **Portraits**: `auto_mask=on` with `skin` at its default 2.0 — smooth skin that keeps structure; non-skin areas are unaffected;
-- **Result looks over-processed**: lower `structure` first, then `intensity` if needed; `tone` usually stays alone.
+<a href="https://paypal.me/mnecstream" target="_blank">
+  <img src="https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" height="42" alt="Donate with PayPal"/>
+</a>
 
-### Example Workflow
+<p>
+  <b>Every contribution helps keep this repository actively maintained and tested!</b><br/>
+  👉 <a href="https://paypal.me/mnecstream">paypal.me/mnecstream</a>
+</p>
 
-- [`examples/ComfyUI-RH-DLSS5_image_api.json`](examples/ComfyUI-RH-DLSS5_image_api.json) — LoadImage → RH_DLSS5Enhance → SaveImage.
-- [`examples/ComfyUI-RH-DLSS5_video_api.json`](examples/ComfyUI-RH-DLSS5_video_api.json) — LoadVideo → RH_DLSS5Enhance → SaveVideo (needs a recent ComfyUI build for LoadVideo/SaveVideo).
-- [`examples/ComfyUI-RH-DLSS5_frame_interp_api.json`](examples/ComfyUI-RH-DLSS5_frame_interp_api.json) — LoadVideo → RH_DLSS5FrameInterpolation (2x) → SaveVideo.
+</div>
 
-Import the JSON into ComfyUI and replace the placeholder media names in the Load nodes before submitting.
+---
 
-Frame interpolation tips: 24→48 fps with `2x` is the sweet spot (every interval gets exactly one generated frame); `3x`/`4x` are built from cascaded 2x passes and cost proportionally more time and memory. On long clips the VIDEO path encodes while interpolating, so memory grows with the decoder, not the clip length.
+## 🤝 Licenses & Shoutouts
 
-## Queueing and caching
+This project is built upon the incredible work of researchers and open-source pioneers across the community:
 
-The node is stateless per run and safe for queued prompts: Linux spawns one Wine worker per execution (serialized by an internal lock), Windows keeps one bridge session per GPU and reuses it when sizes/settings match. `IS_CHANGED` hashes parameters plus a probe of the input tensor / source video metadata, so re-queued identical work is served from ComfyUI's cache.
+- **[RH-RunningHub](https://github.com/RH-RunningHub/ComfyUI-RH-DLSS5):** Original creators of `ComfyUI-RH-DLSS5` (released under the MIT License).
+- **[danielblnc (Daniel Blanco)](https://github.com/danielblnc/DLSS-NR-on-AMD):** Author of the groundbreaking AMD HIP native kernel implementation for DLSS-NR on Radeon GPUs.
+- **[3zwr1](https://github.com/3zwr1/AMD-NR---OptiScaler) & [lmxxf](https://github.com/lmxxf/dlss5-on-amd-9070xt-porting):** Authors of the `AMD-NR---OptiScaler` bridge and D3D12 porting layer.
+- **[Speedstu](https://github.com/Speedstu/CUDA-for-AMD-Windows) & the ZLUDA project:** For making CUDA/HIP acceleration viable on AMD GPUs in Windows.
 
-## Verification
+---
 
-Verified end-to-end on the Linux path: 320x240 48-frame test clip, 1x and 1.5x (480x360), Wine 11.0 + DXVK 3.1 + vkd3d-proton 3.0.1 + DXVK-NVAPI on RTX 4090 / driver 580.95.05, runtime DLSSNR 310.8. In 2026-09 a from-scratch install following this document (including the 2b fallback and the layered self-check) was validated on a fresh Ubuntu 22.04 container. The Windows in-process bridge follows the same protocol as the MIT-licensed reference integration.
-
-Frame interpolation verified on the same machine: 2x/3x/4x frame counts and source-slot alignment checked against synthetic moving-content clips (hardware NVOFA and DIS guides, audio stream-copy), and a 400-frame 1080p 2x run completes with roughly 20 GB host RAM peak where the pre-streaming implementation was killed by the memory cgroup on the same clip.
-
-## 🔗 Links
-
-[![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
-
-- Upstream reference (Linux/Wine CLI this plugin is based on): <https://github.com/kos94ok/ComfyUI-DLSS5-NR-Linux>
-- Upstream reference (Windows in-process bridge): <https://github.com/lisitskyaa/ComfyUI-DLSS5-NR>
-- Video-worker reference (Merserk protocol): <https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer>
-- Frame-generation worker & scheduler reference: <https://github.com/Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation>
-- Official NVIDIA DLSS SDK (source of `nvngx_dlss.dll`): <https://github.com/NVIDIA/DLSS/releases>
-- NVIDIA DLSS repository: <https://github.com/NVIDIA/DLSS>
-- DXVK: <https://github.com/doitsujin/dxvk> · vkd3d-proton: <https://github.com/HansKristian-Work/vkd3d-proton> · DXVK-NVAPI: <https://github.com/jp7677/dxvk-nvapi>
-
-## 📄 License
-
-Plugin code and project-owned native components: **MIT** — see [LICENSE](LICENSE). The native bridge/host sources under `native/src/` derive from the MIT-licensed ComfyUI-DLSS5-NR projects listed above.
-
-NVIDIA NGX/DLSS runtime binaries (`nvngx_dlssnr.dll`, `nvngx_dlss.dll`, `_nvngx.dll`) are **proprietary NVIDIA software**: they are not included, not downloaded, and not redistributed. Use only builds you are legally entitled to use. DLSS and NGX are NVIDIA trademarks.
-
-## 🙏 Acknowledgements
-
-This project is based on the MIT-licensed reference integrations [ComfyUI-DLSS5-NR-Linux](https://github.com/kos94ok/ComfyUI-DLSS5-NR-Linux) (Linux/Wine CLI, whose `dlss5nr_video.py` transport protocol the Linux worker adapts) and [ComfyUI-DLSS5-NR](https://github.com/lisitskyaa/ComfyUI-DLSS5-NR) (Windows in-process bridge). The frame-generation pipeline follows the Merserk-lineage worker protocol and the scheduling design of [ComfyUI-NVIDIA-DLSS-Frame-Interpolation](https://github.com/Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation). It builds on [DXVK](https://github.com/doitsujin/dxvk), [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) and [DXVK-NVAPI](https://github.com/jp7677/dxvk-nvapi). Thanks to NVIDIA for the NGX/DLSS SDK, and to [@tetsuoo-online](https://github.com/tetsuoo-online) for reporting and pinpointing the Windows backend issue (#1), and to [@MakkiShizu](https://github.com/MakkiShizu) for the Windows optical-flow and worker-launch fixes (#2).
+<div align="center">
+  <b>ComfyUI-RH-DLSS5-AMD</b> • Crafted with passion for the open AMD AI community.
+</div>

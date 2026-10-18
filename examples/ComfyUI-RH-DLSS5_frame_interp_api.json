@@ -1,6 +1,6 @@
 {
     "1": {
-        "class_type": "RH_DLSS5FrameInterpolation",
+        "class_type": "RH_DLSS5FrameInterpolation_AMD",
         "inputs": {
             "video": [
                 "2",

@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import common
+from .amd_engine import write_amd_nr_config
 from .common import DLSS5Error
 
 _lock = threading.RLock()
@@ -100,6 +101,8 @@ def process_frames(frames, input_w: int, input_h: int, output_w: int, output_h: 
     """
     common.validate_sizes(input_w, input_h, output_w, output_h)
     runtime: Path = params["runtime"]
+    # Write hot-reload configuration for AMD-NR / OptiScaler / danielblnc runtimes
+    write_amd_nr_config(runtime, params)
     # The bridge reads this at carrier-feature creation (AutoExposure/IsHDR flags).
     os.environ["DLSS5NR_HDR"] = "1" if params.get("hdr") else "0"
     lib = _ensure_initialized(int(params["gpu_index"]), runtime)

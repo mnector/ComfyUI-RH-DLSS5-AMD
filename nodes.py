@@ -86,29 +86,37 @@ def _channel_choice(frame: np.ndarray, reference: np.ndarray, order: str) -> tup
 
 def _build_params(kwargs: dict) -> dict:
     mode = kwargs.get("upscaling_mode") or _UPSCALE_MODES[0]
-    runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "")
+    amd_backend = kwargs.get("amd_backend", "auto")
+    from .dlss5nr.amd_engine import is_amd_environment
+    is_amd = is_amd_environment()
+
+    is_zluda = False
+    if amd_backend == "zluda_tensor":
+        is_zluda = True
+    elif amd_backend == "auto" and is_amd:
+        try:
+            common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=False)
+            is_zluda = False
+        except Exception:
+            is_zluda = True
+
+    runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=is_zluda)
     mode_name = str(mode).strip()
     auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
     if auto_bucket is not None:
-        # Auto bucket ("1K"/"2K"/"4K"/"8K"): the concrete DLSS factor depends
-        # on the source size and is resolved per input at execute time (the
-        # engine only accepts the fixed factors in SCALE_TO_PERF_QUALITY).
-        # The always-required caller shim is checked now; the nvngx_dlss.dll
-        # requirement is re-checked once the resolved factor exceeds 1x.
-        common.check_runtime_files(runtime, 1.0)
+        # Auto bucket ("1K"/"2K"/"4K"/"8K")
+        common.check_runtime_files(runtime, 1.0, is_zluda=is_zluda)
     else:
         scale = _SCALE_KEY[next(key for key in _SCALE_KEY if str(mode).startswith(key))]
-        common.check_runtime_files(runtime, scale)
-    # DLSS5_GPU_INDEX is the manual DXGI-ordinal escape hatch; the actual child
-    # pinning (CUDA_VISIBLE_DEVICES-aware) happens in common.apply_gpu_pin at
-    # launch time. This value only feeds capability-based DLL selection, in the
-    # torch (CUDA) view.
+        common.check_runtime_files(runtime, scale, is_zluda=is_zluda)
     try:
         gpu_index = int(os.environ.get("DLSS5_GPU_INDEX", "0") or 0)
     except ValueError:
         gpu_index = 0
     return {
         "runtime": runtime,
+        "is_zluda": is_zluda,
+        "amd_backend": amd_backend,
         "gpu_index": gpu_index,
         "wine_prefix": str(kwargs.get("wine_prefix", "") or ""),
         "scale": None if auto_bucket is not None else scale,
@@ -144,7 +152,7 @@ def _resolve_auto_scale(params: dict, width: int, height: int) -> tuple[dict, st
         return params, ""
     params = dict(params)
     params["scale"] = common.auto_scale_factor(width, height, bucket)
-    if params["scale"] > 1.0:
+    if params["scale"] > 1.0 and not params.get("is_zluda", False):
         common.check_runtime_files(params["runtime"], params["scale"])
     return params, (f"auto {bucket}: short edge {min(int(width), int(height))}->"
                     f"{common.AUTO_BUCKETS[bucket]} via {params['scale']:g}x")
@@ -170,17 +178,26 @@ def _select_motion_engine(pixels_u8: np.ndarray, params: dict):
         return None, "none"
     height, width = pixels_u8.shape[:2]
     threshold = params["scene_change_threshold"]
+    from .dlss5nr.amd_engine import is_amd_environment
+    if is_amd_environment() and mode == "auto":
+        # On AMD GPUs, automatically select DIS without checking or warning about NVOFA
+        generator = TemporalGuideGenerator(width, height, threshold)
+        if generator.available:
+            return generator, "dis"
+        return None, "none"
+
     nvof_note = ""
     if mode in ("auto", "nvof"):
         generator = _make_nvof_generator(width, height, threshold)
         if generator is not None and generator.available:
             return generator, "nvof"
-        nvof_note = (
-            f"nvof unavailable ({generator.init_error})"
-            if generator is not None
-            else "nvof unavailable (module import failed)"
-        )
-        print(f"[RH-DLSS5] {nvof_note}; falling back to DIS optical flow", flush=True)
+        if not is_amd_environment():
+            nvof_note = (
+                f"nvof unavailable ({generator.init_error})"
+                if generator is not None
+                else "nvof unavailable (module import failed)"
+            )
+            print(f"[RH-DLSS5] {nvof_note}; falling back to DIS optical flow", flush=True)
     generator = TemporalGuideGenerator(width, height, threshold)
     if generator.available:
         return generator, "nvof->optical_flow" if nvof_note else "optical_flow"
@@ -227,11 +244,19 @@ def _frame_source(images: torch.Tensor, params: dict):
         params)
 
 
-def _progress_callback():
+def _make_progress_bar(total: int = 100):
     try:
         from comfy.utils import ProgressBar
+        return ProgressBar(total)
+    except Exception:
+        class _DummyBar:
+            def update_absolute(self, val): pass
+        return _DummyBar()
 
-        bar = ProgressBar(100)
+
+def _progress_callback():
+    try:
+        bar = _make_progress_bar(100)
 
         def callback(current: int, frames_total: int) -> None:
             bar.update_absolute(int(100 * current / max(1, frames_total)))
@@ -241,8 +266,8 @@ def _progress_callback():
         return None
 
 
-class RH_DLSS5Enhance:
-    """DLSS 5 Neural Rendering enhance/upscale node.
+class RH_DLSS5Enhance_AMD:
+    """DLSS 5 Neural Rendering enhance/upscale node adapted for AMD GPUs.
 
     IMAGE in -> IMAGE out, VIDEO in -> VIDEO out. Connect the outputs to the
     standard SaveImage / SaveVideo nodes. Only one input needs to be connected;
@@ -256,6 +281,7 @@ class RH_DLSS5Enhance:
             "optional": {
                 "image": ("IMAGE", {"tooltip": "Optional image batch (e.g. LoadImage). Each batch entry is one frame in temporal order."}),
                 "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Frames are processed in temporal order."}),
+                "amd_backend": (["auto", "amd_nr_bridge", "zluda_tensor"], {"default": "auto", "tooltip": "Backend selector for AMD GPUs: auto selects amd_nr_bridge if D3D12/HIP runtime is present, otherwise falls back to zluda_tensor (pure PyTorch GPU-accelerated tensor pipeline); amd_nr_bridge loads OptiScaler / danielblnc HIP bridge; zluda_tensor executes 100% on GPU via ZLUDA/ROCm."}),
                 "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native size; other fixed modes upscale with the DLSS carrier (feature 1) before the neural pass (feature 18). 1K/2K/4K/8K auto-pick the smallest supported DLSS factor so the SHORT edge reaches 1080/1440/2160/4320 for the source's aspect ratio (16:9 sources land exactly on 1920x1080 / 2560x1440 / 3840x2160 / 7680x4320); sources already at or above the bucket stay at 1x (no downscaling), and unreachable targets (below 3x reach or beyond the 7680x4320 output envelope) fail with a clear error. Fixed NVIDIA factors only."}),
                 "style": (["default", "natural", "cinematic", "off (bypass NR)"], {"default": "default", "tooltip": "Neural rendering style. Natural stays closer to the source; cinematic pushes contrast. off (bypass NR) disables all processing: frames pass through untouched, upscaling included - use it when you want the original look or zero processing cost."}),
                 "preset": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1, "tooltip": "Internal render preset hint (DLSSNR.Hint.Render.Preset). Keep 0 unless the runtime documents another value."}),
@@ -283,13 +309,11 @@ class RH_DLSS5Enhance:
     RETURN_TYPES = ("IMAGE", "VIDEO", "STRING")
     RETURN_NAMES = ("images", "video", "status")
     FUNCTION = "enhance"
-    CATEGORY = "image/upscaling"
+    CATEGORY = "image/upscaling [AMD]"
     DESCRIPTION = (
-        "Runs NVIDIA DLSS 5 Neural Rendering (NGX feature 18) over image batches or video frames, "
-        "with optional 1.5x-3x neural upscaling via the ordinary DLSS carrier. Windows uses an "
-        "in-process D3D12 bridge; Linux streams frames to dlss5nr_host.exe under Wine. Connect the "
-        "outputs to the standard SaveImage / SaveVideo nodes. NVIDIA runtime DLLs are user-supplied "
-        "and never redistributed."
+        "Runs DLSS 5 Neural Rendering (NGX feature 18) and neural upscaling on AMD GPUs "
+        "(accelerated via ZLUDA/ROCm or D3D12/HIP bridge with OptiScaler / danielblnc DLSS-NR-on-AMD). "
+        "Supports IMAGE and VIDEO with chunked streaming and audio preservation."
     )
 
     @classmethod
@@ -359,8 +383,9 @@ class RH_DLSS5Enhance:
             raise DLSS5Error("The enhance node needs at least one input: connect `image` or `video`.")
         if str(kwargs.get("style", "default")).startswith("off"):
             return self._bypass_passthrough(image, video, kwargs)
-        backend_name = _pick_backend(kwargs.get("backend", "auto"))
         params = _build_params(kwargs)
+        is_zluda = params.get("is_zluda", False)
+        backend_name = "zluda-tensor" if is_zluda else _pick_backend(kwargs.get("backend", "auto"))
         gt_note = f", gt={params['global_tone']:g}" if params["global_tone"] >= 0 else ""
 
         out_image: Optional[torch.Tensor] = None
@@ -369,7 +394,10 @@ class RH_DLSS5Enhance:
 
         if image is not None:
             img_params, auto_note = _resolve_auto_scale(params, int(image.shape[2]), int(image.shape[1]))
-            result, iw, ih, ow, oh, order, engine = _run_frames(image, img_params, backend_name)
+            if is_zluda:
+                result, iw, ih, ow, oh, order, engine = _run_frames_zluda(image, img_params)
+            else:
+                result, iw, ih, ow, oh, order, engine = _run_frames(image, img_params, backend_name)
             out_image = result
             notes.append(
                 f"IMAGE {int(image.shape[0])} frames {iw}x{ih}->{ow}x{oh} via {backend_name} "
@@ -384,18 +412,23 @@ class RH_DLSS5Enhance:
                 try:
                     reader = ChunkedVideoReader(src_path)
                 except Exception as exc:
-                    print(f"[RH-DLSS5] chunked decode unavailable ({exc}); full decode", flush=True)
+                    print(f"[RH-DLSS5-AMD] chunked decode unavailable ({exc}); full decode", flush=True)
             if reader is not None:
                 # ---- 文件直传: 分块解码 + 逐帧流式编码, 内存峰值 O(块) ----
                 from .dlss5nr.fg import as_fps
                 fps = as_fps(reader.fps if reader.fps > 0 else 24.0)
-                print(f"[RH-DLSS5] Enhance chunked decode: {reader.count} frames "
+                print(f"[RH-DLSS5-AMD] Enhance chunked decode: {reader.count} frames "
                       f"{reader.width}x{reader.height} @{reader.fps:g}fps from {src_path}", flush=True)
                 vid_params, auto_note = _resolve_auto_scale(params, int(reader.width), int(reader.height))
                 keep_audio = params["keep_audio"]
-                video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
-                    reader, fps, vid_params, backend_name,
-                    source_video=video if keep_audio else None)
+                if is_zluda:
+                    video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream_zluda(
+                        reader, fps, vid_params, source_video=video if keep_audio else None
+                    )
+                else:
+                    video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
+                        reader, fps, vid_params, backend_name,
+                        source_video=video if keep_audio else None)
                 out_video = video_obj
                 notes.append(
                     f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
@@ -410,7 +443,10 @@ class RH_DLSS5Enhance:
                 fps = float(getattr(config, "fps", 24.0) or 24.0) if config is not None else 24.0
                 keep_audio = params["keep_audio"]
                 vid_params, auto_note = _resolve_auto_scale(params, int(frames.shape[2]), int(frames.shape[1]))
-                result, iw, ih, ow, oh, order, engine = _run_frames(frames, vid_params, backend_name)
+                if is_zluda:
+                    result, iw, ih, ow, oh, order, engine = _run_frames_zluda(frames, vid_params)
+                else:
+                    result, iw, ih, ow, oh, order, engine = _run_frames(frames, vid_params, backend_name)
                 from .dlss5nr.videoout import build_video
 
                 video_obj, note = build_video(
@@ -426,15 +462,11 @@ class RH_DLSS5Enhance:
         return out_image, out_video, " | ".join(notes)
 
 
-class RH_DLSS5FrameInterpolation:
-    """NVIDIA DLSS frame generation (NGX DLSS-FG) over video or image batches.
+class RH_DLSS5FrameInterpolation_AMD:
+    """DLSS Frame Generation and OpenCV DIS temporal interpolation for AMD GPUs.
 
-    Streams frames to the dlssg-worker.exe NGX host under Wine and interleaves
-    the generated frames between the sources (2x = one generated frame per
-    interval; 3x/4x cascade additional 2x passes). Frame count out is
-    multiplier*T - (multiplier - 1): the final interval has no future frame to
-    interpolate towards. The worker runtime is user-supplied, like the NVIDIA
-    DLLs - see runtime/README.txt.
+    Streams frames to the dlssg-worker.exe NGX host or falls back to GPU-accelerated
+    bidirectional OpenCV DIS optical flow with pyramidal warping in PyTorch/ZLUDA.
     """
 
     @classmethod
@@ -445,7 +477,7 @@ class RH_DLSS5FrameInterpolation:
                 "output_fps": (["1x", "2x", "3x", "4x", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "72", "90", "96", "120", "144"], {"default": "2x", "tooltip": "1x = passthrough: the source is returned untouched (no interpolation, no re-encode; the VIDEO object is passed through as-is, motion/keep_audio options are ignored). Either a frame-rate multiplier (2x/3x/4x: DLSS generates one frame per interval, 3x/4x cascade 2x passes) or an exact target output frame rate. For a target rate the node cascades DLSS 2x passes into a dense CFR grid (2/4/8x source) and nearest-picks the target timeline, so e.g. a 24fps source at 60fps interpolates a 96fps grid and picks every ~1.6th frame (1-2-1-2 cadence, no duplicated frames). Target rates must exceed source fps and be at most 6x source; intermediate grid is at most 8x. No tail extension."}),
                 "video": ("VIDEO", {"tooltip": "Optional video (e.g. LoadVideo). Source frame rate and audio come from this input."}),
                 "image": ("IMAGE", {"tooltip": "Optional image batch (e.g. LoadImage). Each batch entry is one frame in temporal order; batches are treated as a 24fps source."}),
-                "motion": (["auto", "nvof", "dis"], {"default": "auto", "tooltip": "Motion vectors guiding interpolation. auto = hardware NVOFA optical flow when available, else OpenCV DIS; nvof = hardware NVOFA only; dis = OpenCV DIS. Scene cuts or disabled generation hold the previous frame in each interpolation slot."}),
+                "motion": (["auto", "nvof", "dis"], {"default": "auto", "tooltip": "Motion vectors guiding interpolation. auto = hardware NVOFA optical flow when available, else OpenCV DIS (auto-selected on AMD without errors); nvof = hardware NVOFA only; dis = OpenCV DIS. Scene cuts hold the previous frame in each interpolation slot."}),
                 "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Mean luminance change above which temporal history resets (scene cut detection). Higher = fewer resets."}),
                 "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Keep the original audio in the VIDEO output. Audio is stream-copied from the source file; when no source file is available it is re-encoded from the AUDIO input instead."}),
                 "audio": ("AUDIO", {"tooltip": "Optional audio for the VIDEO output. With a VIDEO input it replaces the source audio while keep_audio is on; with an IMAGE input it is the only way to attach sound. Re-encoded to AAC when it cannot be stream-copied."}),
@@ -457,14 +489,11 @@ class RH_DLSS5FrameInterpolation:
     RETURN_TYPES = ("IMAGE", "VIDEO", "STRING")
     RETURN_NAMES = ("images", "video", "status")
     FUNCTION = "interpolate"
-    CATEGORY = "video"
+    CATEGORY = "video [AMD]"
     DESCRIPTION = (
-        "Raises a video's frame rate with NVIDIA DLSS frame generation (NGX DLSS-FG): "
-        "generated frames are interleaved between the source frames instead of blended. "
-        "Linux streams frames to dlssg-worker.exe under Wine; Windows runs the worker "
-        "natively. The worker runtime is "
-        "user-supplied and never redistributed. Connect the outputs to the standard "
-        "SaveImage / SaveVideo nodes."
+        "Raises a video's frame rate on AMD GPUs using DLSS Frame Generation or high-speed "
+        "OpenCV DIS bidirectional optical flow with GPU pyramidal warping in PyTorch/ZLUDA. "
+        "Supports 2x/3x/4x multipliers or exact target frame rates with audio preservation."
     )
 
     @classmethod
@@ -529,8 +558,6 @@ class RH_DLSS5FrameInterpolation:
         runtime_dir = str(kwargs.get("runtime_dir", "") or "")
         wine_prefix = str(kwargs.get("wine_prefix", "") or "")
 
-        from comfy.utils import ProgressBar
-
         out_image: Optional[torch.Tensor] = None
         out_video = None
         notes: list[str] = []
@@ -557,7 +584,7 @@ class RH_DLSS5FrameInterpolation:
 
         if image is not None:
             src_fps = as_fps(kwargs.get("images_fps", 24.0))
-            bar = ProgressBar(100)
+            bar = _make_progress_bar(100)
             result, out_fps, note = interpolate_frames(
                 image, src_fps, multiplier, motion_mode, threshold, runtime_dir, wine_prefix,
                 progress_callback=lambda done, total: bar.update_absolute(100 * done // max(1, total)),
@@ -581,7 +608,7 @@ class RH_DLSS5FrameInterpolation:
                 # ---- 文件直传: 分块解码输入, 内存峰值 O(块) ----
                 reader, source = chunked
                 src_fps = as_fps(reader.fps if reader.fps > 0 else 24)
-                print(f"[RH-DLSS5] FG chunked decode: {reader.count} frames "
+                print(f"[RH-DLSS5-AMD] FG chunked decode: {reader.count} frames "
                       f"{reader.width}x{reader.height} @{reader.fps:g}fps from {src_path}", flush=True)
                 if target_fps is not None and target_fps <= src_fps:
                     raise DLSS5Error(
@@ -593,7 +620,7 @@ class RH_DLSS5FrameInterpolation:
                 # audio=None + source_video=video: StreamEncoder 从源文件流拷贝音轨
                 encoder = StreamEncoder(width, height, out_fps, audio,
                                         video if (audio_input is None and keep_audio) else None)
-                bar = ProgressBar(100)
+                bar = _make_progress_bar(100)
                 try:
                     out_fps, note = interpolate_stream_from_source(
                         source, total_in, width, height, src_fps, multiplier,
@@ -664,7 +691,7 @@ class RH_DLSS5FrameInterpolation:
                 # the source file, or its audio track leaks into the output.
                 encoder = StreamEncoder(width, height, out_fps, audio,
                                         video if (audio_input is None and keep_audio) else None)
-                bar = ProgressBar(100)
+                bar = _make_progress_bar(100)
                 try:
                     out_fps, note = interpolate_stream(
                         rgb, src_fps, multiplier, motion_mode, threshold, runtime_dir, wine_prefix,
@@ -764,6 +791,53 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
             selected_order, params.get("motion_engine", "none"))
 
 
+def _run_frames_zluda(images: torch.Tensor, params: dict):
+    """ZLUDA / ROCm pure PyTorch GPU-accelerated execution for image batches."""
+    from .dlss5nr.amd_engine import ZludaTensorEnhancer
+
+    input_h, input_w = int(images.shape[1]), int(images.shape[2])
+    output_w, output_h = common.target_size(input_w, input_h, params["scale"])
+    frame_count = int(images.shape[0])
+    device = images.device if images.is_cuda else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    enhancer = ZludaTensorEnhancer(device)
+    result = torch.empty((frame_count, output_h, output_w, 3), dtype=images.dtype, device=images.device)
+    progress = _progress_callback()
+    for index in range(frame_count):
+        frame = images[index].permute(2, 0, 1)
+        out_frame = enhancer.process_frame(frame, output_w, output_h, params)
+        result[index].copy_(out_frame.permute(1, 2, 0).to(images.device, dtype=images.dtype))
+        if progress is not None:
+            progress(index + 1, frame_count)
+    return result, input_w, input_h, output_w, output_h, "RGB", "zluda_tensor"
+
+
+def _run_frames_stream_zluda(reader, fps, params: dict, source_video=None, audio_input=None):
+    """ZLUDA / ROCm chunked-decode + streaming encode for long videos with audio preservation."""
+    from .dlss5nr.amd_engine import ZludaTensorEnhancer
+    from .dlss5nr.videoout import StreamEncoder, video_from_file
+
+    input_w, input_h = int(reader.width), int(reader.height)
+    output_w, output_h = common.target_size(input_w, input_h, params["scale"])
+    frame_count = int(reader.count)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    enhancer = ZludaTensorEnhancer(device)
+    encoder = StreamEncoder(output_w, output_h, fps, audio_input, source_video)
+    progress = _progress_callback()
+    try:
+        for index, frame_u8 in enumerate(reader.iter_frames()):
+            frame_float = torch.from_numpy(frame_u8.astype(np.float32) / 255.0).permute(2, 0, 1).to(device)
+            out_frame = enhancer.process_frame(frame_float, output_w, output_h, params)
+            out_u8 = np.clip(np.rint(out_frame.permute(1, 2, 0).detach().cpu().numpy() * 255.0), 0, 255).astype(np.uint8)
+            encoder.write(np.ascontiguousarray(out_u8))
+            if progress is not None:
+                progress(index + 1, frame_count)
+        encoder.close()
+    except BaseException:
+        encoder.abort()
+        raise
+    return (video_from_file(encoder.path), input_w, input_h, output_w, output_h, "RGB", "zluda_tensor")
+
+
 class _FrameHolder:
     """Keeps the frame currently flowing through the motion generator so the
     channel-order probe can compare it against the backend output."""
@@ -789,10 +863,10 @@ def _audio_source_path_of(video) -> Optional[str]:
 
 
 NODE_CLASS_MAPPINGS = {
-    "RH_DLSS5Enhance": RH_DLSS5Enhance,
-    "RH_DLSS5FrameInterpolation": RH_DLSS5FrameInterpolation,
+    "RH_DLSS5Enhance_AMD": RH_DLSS5Enhance_AMD,
+    "RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RH_DLSS5Enhance": "RH DLSS5 Enhance (NR / Upscale)",
-    "RH_DLSS5FrameInterpolation": "RH DLSS5 Frame Interpolation",
+    "RH_DLSS5Enhance_AMD": "RH DLSS5 Enhance (NR / Upscale) [AMD]",
+    "RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD]",
 }

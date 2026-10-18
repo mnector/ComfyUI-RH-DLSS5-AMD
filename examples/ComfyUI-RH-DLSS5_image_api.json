@@ -1,8 +1,9 @@
 {
   "1": {
-    "class_type": "RH_DLSS5Enhance",
+    "class_type": "RH_DLSS5Enhance_AMD",
     "inputs": {
       "image": ["2", 0],
+      "amd_backend": "auto",
       "upscaling_mode": "1x (DLAA / native)",
       "style": "default",
       "preset": 0,

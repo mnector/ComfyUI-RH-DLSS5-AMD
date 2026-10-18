@@ -451,7 +451,7 @@ def _ensure_caller_shim(runtime: Path) -> None:
             pass  # check_runtime_files reports the missing shim with a clear message
 
 
-def resolve_runtime_dir(runtime_dir: str = "") -> Path:
+def resolve_runtime_dir(runtime_dir: str = "", allow_fallback: bool = False) -> Path:
     """Runtime directory resolution: widget override -> env -> models/dlss5 -> bundled runtime/."""
     candidates = []
     if runtime_dir and str(runtime_dir).strip():
@@ -462,26 +462,46 @@ def resolve_runtime_dir(runtime_dir: str = "") -> Path:
     candidates.append(_comfy_models_dir() / "dlss5")
     candidates.append(PLUGIN_ROOT / "runtime")
     for candidate in candidates:
-        if (candidate / "nvngx_dlssnr.dll").is_file():
+        if (
+            (candidate / "nvngx_dlssnr.dll").is_file()
+            or (candidate / "LmxxfNrRuntime.dll").is_file()
+            or (candidate / "OptiScaler.dll").is_file()
+            or (candidate / "amdhip64_7.dll").is_file()
+        ):
             _ensure_caller_shim(candidate)
             return candidate
+    if allow_fallback:
+        primary = _comfy_models_dir() / "dlss5"
+        primary.mkdir(parents=True, exist_ok=True)
+        return primary
     listed = ", ".join(str(c) for c in candidates)
     raise DLSS5Error(
-        "No neural-rendering runtime was found (looked for nvngx_dlssnr.dll in: "
-        f"{listed}). Place your legally obtained nvngx_dlssnr.dll in the models "
-        "folder (recommended, survives custom_nodes updates) or one of the other "
-        "listed folders. See runtime/README.txt for the exact location."
+        "No neural-rendering runtime was found (looked for nvngx_dlssnr.dll / AMD-NR in: "
+        f"{listed}). For AMD GPUs, place your nvngx_dlssnr.dll alongside AMD-NR---OptiScaler "
+        "or danielblnc DLSS-NR-on-AMD runtime in ComfyUI/models/dlss5/, or select "
+        "amd_backend=zluda_tensor for direct GPU tensor execution."
     )
 
 
-def check_runtime_files(runtime: Path, scale_factor: float) -> None:
+def check_runtime_files(runtime: Path, scale_factor: float, is_zluda: bool = False) -> None:
+    if is_zluda:
+        return
     missing = []
-    if scale_factor > 1.0 and not (runtime / "nvngx_dlss.dll").is_file():
+    has_amd_runtime = (
+        (runtime / "LmxxfNrRuntime.dll").is_file()
+        or (runtime / "OptiScaler.dll").is_file()
+        or (runtime / "amdhip64_7.dll").is_file()
+    )
+    if scale_factor > 1.0 and not (runtime / "nvngx_dlss.dll").is_file() and not has_amd_runtime:
         missing.append(
             f"{runtime / 'nvngx_dlss.dll'} (required for upscaling above 1x; "
-            "download it from the official NVIDIA DLSS SDK releases)"
+            "download it from the official NVIDIA DLSS SDK releases or use zluda_tensor)"
         )
-    if not (runtime / "caller" / "nvngx.dll_comfy.dll").is_file() and not (runtime / "caller" / "nvngx.dll").is_file():
+    if (
+        not (runtime / "caller" / "nvngx.dll_comfy.dll").is_file()
+        and not (runtime / "caller" / "nvngx.dll").is_file()
+        and not has_amd_runtime
+    ):
         missing.append(f"{runtime / 'caller' / 'nvngx.dll_comfy.dll'} (project caller shim)")
     if missing:
         raise DLSS5Error("The neural-rendering runtime is incomplete. Missing: "

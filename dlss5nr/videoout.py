@@ -196,6 +196,19 @@ def _audio_to_wav(audio_input) -> Path | None:
         return None
 
 
+def _safe_temp_dir() -> Path:
+    try:
+        from folder_paths import get_temp_directory
+        d = Path(get_temp_directory())
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        import tempfile
+        d = Path(tempfile.gettempdir())
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+
 class StreamEncoder:
     """Incremental RGB-uint8 sink that pipes frames into an ffmpeg rawvideo encoder.
 
@@ -216,9 +229,8 @@ class StreamEncoder:
         ffmpeg = _find_ffmpeg()
         if ffmpeg is None:
             raise RuntimeError("no ffmpeg binary available for streaming video encode")
-        from folder_paths import get_temp_directory
 
-        self.path = Path(get_temp_directory()) / f"dlss5_{uuid.uuid4().hex}.mp4"
+        self.path = _safe_temp_dir() / f"dlss5_{uuid.uuid4().hex}.mp4"
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -337,9 +349,7 @@ def build_video(images: torch.Tensor, fps: Fraction | float, audio_input=None, s
     if video_obj is not None:
         return video_obj, "in-memory VIDEO object (audio preserved when provided)"
 
-    from folder_paths import get_temp_directory
-
-    temp_path = Path(get_temp_directory()) / f"dlss5_{uuid.uuid4().hex}.mp4"
+    temp_path = _safe_temp_dir() / f"dlss5_{uuid.uuid4().hex}.mp4"
     _encode_with_pyav(images, fps, temp_path)
 
     audio_note = "no audio"

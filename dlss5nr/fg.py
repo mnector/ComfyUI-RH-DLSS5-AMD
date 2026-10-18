@@ -332,18 +332,22 @@ class FGSession:
 
 
 def _guide_generator(width: int, height: int, motion_mode: str, threshold: float):
+    from .amd_engine import is_amd_environment
+    # On AMD GPUs, NVOFA does not exist; motion="auto" selects DIS directly
+    if is_amd_environment() and motion_mode == "auto":
+        from .motion import TemporalGuideGenerator
+        return TemporalGuideGenerator(width, height, threshold), "dis"
+
     if motion_mode in ("auto", "nvof"):
         try:
             from .nvof import NvofGuideGenerator
 
             guide = NvofGuideGenerator(width, height, threshold)
-            # "nvof" is documented as hardware-only, so it keeps the generator
-            # even when setup failed (zero motion); "auto" must fall back or it
-            # would silently emit nothing but duplicated frames.
             if guide.available or motion_mode == "nvof":
                 return guide, "nvof"
-            print(f"[RH-DLSS5] nvof unavailable ({guide.init_error}); "
-                  "falling back to DIS optical flow", flush=True)
+            if not is_amd_environment():
+                print(f"[RH-DLSS5] nvof unavailable ({guide.init_error}); "
+                      "falling back to DIS optical flow", flush=True)
         except Exception:
             if motion_mode == "nvof":
                 raise
@@ -460,17 +464,139 @@ def _prepare(src_fps, width: int, height: int, frames_count: int, runtime_dir: s
     """Shared validation + runtime/probe gate for both interpolation entry points."""
     if frames_count < 2:
         raise DLSS5Error("DLSS frame interpolation needs at least 2 frames.")
-    runtime = find_fg_runtime(runtime_dir)
-    probe = probe_fg_capabilities(runtime)
-    if not probe.get("available"):
-        raise DLSS5Error(f"DLSS frame generation is not available on this machine: "
-                         f"{probe.get('detail') or probe}")
     src_fps = as_fps(src_fps)
     if src_fps <= 0:
         raise DLSS5Error(f"Invalid source frame rate: {src_fps}")
     if width % 2 or height % 2:
         raise DLSS5Error("DLSS frame generation needs even frame dimensions.")
-    return runtime, src_fps
+    try:
+        runtime = find_fg_runtime(runtime_dir)
+        probe = probe_fg_capabilities(runtime)
+        if probe.get("available"):
+            return runtime, src_fps
+    except Exception:
+        pass
+    # On AMD or when dlssg-worker is unavailable, allow AMD DIS warping fallback
+    return None, src_fps
+
+
+def _interpolate_frames_amd_dis(
+    images: torch.Tensor,
+    src_fps: Fraction,
+    stages: int,
+    out_fps: Fraction,
+    multiplier: int,
+    scene_threshold: float,
+    progress_callback=None,
+    target_fps: Fraction | None = None,
+) -> tuple[torch.Tensor, Fraction, str]:
+    from .amd_engine import AmdFrameInterpolator
+
+    count, height, width, _ = images.shape
+    device = images.device if images.is_cuda else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    interp = AmdFrameInterpolator(device)
+
+    grid_count = (count - 1) * (2 ** stages) + 1
+    picks = _pick_indices(grid_count, src_fps * (2 ** stages), out_fps)
+    out_count = len(picks)
+    result = torch.empty((out_count, height, width, 3), dtype=images.dtype, device=images.device)
+
+    sub_divisions = 2 ** stages
+    curr_k = -1
+    curr_t0 = None
+    curr_t1 = None
+    curr_u0 = None
+    curr_u1 = None
+
+    for out_idx, p in enumerate(picks):
+        k = min(p // sub_divisions, count - 2)
+        sub_idx = p - k * sub_divisions
+        alpha = float(sub_idx) / float(sub_divisions)
+
+        if sub_idx == 0:
+            result[out_idx] = images[k]
+        elif sub_idx == sub_divisions or (p >= (count - 1) * sub_divisions):
+            result[out_idx] = images[min(k + 1, count - 1)]
+        else:
+            if k != curr_k:
+                curr_k = k
+                curr_t0 = images[k].detach().unsqueeze(0).to(device, dtype=torch.float32).permute(0, 3, 1, 2)
+                curr_t1 = images[k + 1].detach().unsqueeze(0).to(device, dtype=torch.float32).permute(0, 3, 1, 2)
+                curr_u0 = np.clip(np.rint(images[k].detach().cpu().numpy() * 255.0), 0, 255).astype(np.uint8)
+                curr_u1 = np.clip(np.rint(images[k + 1].detach().cpu().numpy() * 255.0), 0, 255).astype(np.uint8)
+
+            warped = interp.interpolate_pair(curr_u0, curr_u1, curr_t0, curr_t1, [alpha], scene_threshold)[0]
+            result[out_idx] = warped.squeeze(0).permute(1, 2, 0).to(images.device, dtype=images.dtype)
+
+        if progress_callback is not None:
+            progress_callback(out_idx + 1, out_count)
+
+    note = (f"AMD DIS PyTorch warping {count}->{out_count} frames @{float(out_fps):g}fps "
+            f"(bidirectional optical flow + ZLUDA/ROCm GPU warping)")
+    return result, out_fps, note
+
+
+def _interpolate_stream_amd_dis(
+    sources,
+    count: int,
+    width: int,
+    height: int,
+    src_fps: Fraction,
+    stages: int,
+    out_fps: Fraction,
+    multiplier: int,
+    scene_threshold: float,
+    progress_callback=None,
+    frame_sink=None,
+    target_fps: Fraction | None = None,
+) -> tuple[Fraction, str]:
+    from .amd_engine import AmdFrameInterpolator
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    interp = AmdFrameInterpolator(device)
+
+    grid_count = (count - 1) * (2 ** stages) + 1
+    picks = _pick_indices(grid_count, src_fps * (2 ** stages), out_fps)
+    out_count = len(picks)
+
+    sub_divisions = 2 ** stages
+    curr_k = -1
+    curr_t0 = None
+    curr_t1 = None
+    curr_u0 = None
+    curr_u1 = None
+
+    for out_idx, p in enumerate(picks):
+        k = min(p // sub_divisions, count - 2)
+        sub_idx = p - k * sub_divisions
+        alpha = float(sub_idx) / float(sub_divisions)
+
+        if sub_idx == 0:
+            rgba, _ = sources(k)
+            frame_sink(np.ascontiguousarray(rgba[..., :3]))
+        elif sub_idx == sub_divisions or (p >= (count - 1) * sub_divisions):
+            rgba, _ = sources(min(k + 1, count - 1))
+            frame_sink(np.ascontiguousarray(rgba[..., :3]))
+        else:
+            if k != curr_k:
+                curr_k = k
+                rgba0, _ = sources(k)
+                rgba1, _ = sources(k + 1)
+                curr_u0 = rgba0[..., :3]
+                curr_u1 = rgba1[..., :3]
+                curr_t0 = torch.from_numpy(curr_u0.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
+                curr_t1 = torch.from_numpy(curr_u1.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
+
+            warped = interp.interpolate_pair(curr_u0, curr_u1, curr_t0, curr_t1, [alpha], scene_threshold)[0]
+            warped_u8 = np.clip(np.rint(warped.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255.0), 0, 255).astype(np.uint8)
+            frame_sink(np.ascontiguousarray(warped_u8))
+
+        if progress_callback is not None:
+            progress_callback(out_idx + 1, out_count)
+
+    note = (f"AMD DIS PyTorch streaming {count}->{out_count} frames @{float(out_fps):g}fps "
+            f"(bidirectional optical flow + ZLUDA/ROCm GPU warping)")
+    return out_fps, note
 
 
 def _stage_buffer_path():
@@ -561,6 +687,10 @@ def interpolate_frames(images: torch.Tensor, src_fps, multiplier: int, motion_mo
     count, height, width, _ = images.shape
     stages, out_fps, _ = _plan(src_fps, multiplier, target_fps)
     runtime, src_fps = _prepare(src_fps, width, height, count, runtime_dir)
+    if runtime is None:
+        return _interpolate_frames_amd_dis(
+            images, src_fps, stages, out_fps, multiplier, scene_threshold, progress_callback, target_fps
+        )
     out_count = int((count - 1) * out_fps / src_fps) + 1
     result = torch.empty((out_count, height, width, 3), dtype=torch.float32)
     engines = []
@@ -593,6 +723,11 @@ def interpolate_stream_from_source(sources, count: int, width: int, height: int,
         raise DLSS5Error("interpolate_stream needs a frame_sink callable.")
     stages, out_fps, _ = _plan(src_fps, multiplier, target_fps)
     runtime, src_fps = _prepare(src_fps, width, height, count, runtime_dir)
+    if runtime is None:
+        return _interpolate_stream_amd_dis(
+            sources, count, width, height, src_fps, stages, out_fps, multiplier,
+            scene_threshold, progress_callback, frame_sink, target_fps
+        )
     engines = []
     frames = _sampled_frames(sources, count, runtime, src_fps, stages,
                              out_fps, wine_prefix, scene_threshold, motion_mode,

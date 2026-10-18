@@ -1,38 +1,95 @@
-# 敏感文件 / Sensitive files
-config.json
-.env
-*.pem
-*.key
-sync.sh
-deploy.sh
-cptorh*.sh
+# ==========================================
+# Git Ignore for ComfyUI-RH-DLSS5-AMD
+# Strict filtering for runtimes, binaries & local private configs
+# ==========================================
 
-# Python
+# Local private environment files (STRICT PRIVACY)
+.env
+.env.*
+.env.local
+*.local
+*.local.*
+
+# Python cache & build files
 __pycache__/
 *.py[cod]
-venv/
+*$py.class
 *.egg-info/
+dist/
+build/
+venv/
+.eggs/
 
-# Node.js
-node_modules/
-
-# IDE
-.idea/
+# IDE & Editor files
+.vs/
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# OS
-.DS_Store
-Thumbs.db
+# Compiled binaries, libraries & runtimes (STRICT)
+*.dll
+*.exe
+*.pak
+*.pyd
+*.so
+*.lib
+*.exp
+*.dylib
 
-# 大文件 / Large files
-*.pth
+# Whitelist bundled open-source host & bridge shims from upstream
+!native/bin/dlss5nr_bridge.dll
+!native/bin/dlss5nr_host.exe
+!runtime/caller/nvngx.dll_comfy.dll
+
+# Runtime folder contents (user-supplied weights/runtimes strictly excluded)
+runtime/*
+!runtime/README.txt
+!runtime/.gitkeep
+!runtime/caller/
+!runtime/caller/nvngx.dll_comfy.dll
+!runtime/caller/.gitkeep
+
+# Model weights & Checkpoints (STRICT)
 *.ckpt
 *.safetensors
+*.pth
+*.pt
 *.bin
+*.onnx
+*.gguf
+*.engine
+*.trt
+*.tflite
 models/
 weights/
-save_audio/
 
-# Logs
+# Video, audio, temporary media & 3D assets
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.wav
+*.flac
+*.mp3
+*.glb
+*.gltf
+*.obj
+save_audio/
+temp/
+output/
+outputs/
+
+# Logs & temporary files
 *.log
 *.tmp
+
+# System & OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+# Critical Privacy & Binary Shields
+.env*
+*.local*
