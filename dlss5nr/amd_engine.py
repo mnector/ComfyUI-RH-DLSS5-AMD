@@ -61,16 +61,28 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     if not runtime_dir or not runtime_dir.exists():
         return
 
-    # Resolve AMD-NR style preset and sliders
-    raw_style = str(params.get("nr_style", "Default")).strip()
+    # Resolve AMD-NR style preset and sliders (AMDNR v0.3.5.6)
+    raw_style = str(params.get("nr_style", "Full Model Look")).strip()
     presets = {
-        "Cinematic": {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Crisp":     {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Natural":   {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Vivid":     {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Default":   {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "NVIDIA look":     {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": True},
+        "AMDNR soft":      {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": False},
+        "Cinematic":       {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Crisp":           {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Natural":         {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Vivid":           {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Default":         {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
     }
     preset_dict = presets.get(raw_style, {})
+
+    if "full" in raw_style.lower():
+        amd_nr_look = "auto"
+    elif "nvidia" in raw_style.lower():
+        amd_nr_look = "0"
+    elif "soft" in raw_style.lower():
+        amd_nr_look = "1"
+    else:
+        amd_nr_look = "custom"
 
     enable_nr = bool(params.get("enable_nr", True))
     res_strength = float(params.get("residual_strength", preset_dict.get("residual_strength", 1.00)))
@@ -80,10 +92,10 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", 1.00)))
     colour_str = float(params.get("colour_strength", preset_dict.get("colour_strength", 1.00)))
     
-    placement = "0" if "before" in str(params.get("neural_placement", "Before")).lower() else "1"
+    placement = "1" if "after" in str(params.get("neural_placement", preset_dict.get("neural_placement", "After"))).lower() else "0"
     working_scale = float(params.get("nr_resolution", 100)) / 100.0
     passes = int(params.get("neural_passes", 1))
-    full_net = bool(params.get("full_network", False))
+    full_net = bool(params.get("full_network", preset_dict.get("full_network", True)))
     fast_m = bool(params.get("fast_mode", False))
     dynamic_res = bool(params.get("dynamic_nr_resolution", False))
     interleave = "2" if str(params.get("model_interleave", "Off")).lower() == "on" else "0"
@@ -105,6 +117,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "Enabled", "true" if enable_nr else "false")
             config.set("DlssNr", "AmdNeuralLighting", "true" if enable_nr else "false")
             config.set("DlssNr", "NrBackend", nr_backend)
+            config.set("DlssNr", "AmdNrLook", amd_nr_look)
             config.set("DlssNr", "AmdPlacement", placement)
             config.set("DlssNr", "RunBeforeSR", "true")
             config.set("DlssNr", "ScanExposure", "false")
@@ -123,6 +136,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdColourStrength", f"{colour_str:.4f}")
             config.set("DlssNr", "AmdComposition", composition)
             config.set("DlssNr", "AmdDeviceGate", "false")
+            config.set("DlssNr", "AmdFaceDetail", "true")
 
             # [AmdLook]
             if not config.has_section("AmdLook"):

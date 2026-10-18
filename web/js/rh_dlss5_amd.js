@@ -1,13 +1,36 @@
 import { app } from "../../../scripts/app.js";
 
+// AMDNR v0.3.5.6 Official Style Presets
 const PRESETS = {
-    "Default": {
+    "Full Model Look": {
         "residual_strength": 1.00,
-        "residual_limit": 0.25,
+        "residual_limit": 0.00,
+        "temporal_stability": 0.50,
+        "sharpening": 0.00,
+        "detail_strength": 2.00,
+        "colour_strength": 1.00,
+        "neural_placement": "After upscaling",
+        "full_network": true
+    },
+    "NVIDIA look": {
+        "residual_strength": 1.00,
+        "residual_limit": 0.00,
         "temporal_stability": 0.60,
         "sharpening": 0.00,
         "detail_strength": 1.00,
-        "colour_strength": 1.00
+        "colour_strength": 1.00,
+        "neural_placement": "Before upscaling",
+        "full_network": true
+    },
+    "AMDNR soft": {
+        "residual_strength": 0.70,
+        "residual_limit": 0.15,
+        "temporal_stability": 0.70,
+        "sharpening": 0.00,
+        "detail_strength": 1.00,
+        "colour_strength": 1.00,
+        "neural_placement": "Before upscaling",
+        "full_network": false
     },
     "Cinematic": {
         "residual_strength": 0.85,
@@ -40,6 +63,16 @@ const PRESETS = {
         "sharpening": 0.15,
         "detail_strength": 1.00,
         "colour_strength": 1.00
+    },
+    "Default": {
+        "residual_strength": 1.00,
+        "residual_limit": 0.00,
+        "temporal_stability": 0.50,
+        "sharpening": 0.00,
+        "detail_strength": 2.00,
+        "colour_strength": 1.00,
+        "neural_placement": "After upscaling",
+        "full_network": true
     }
 };
 

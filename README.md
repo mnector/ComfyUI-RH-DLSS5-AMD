@@ -237,11 +237,11 @@ The parameters in this node match the official **AMD-NR GUI (v0.3.5.1)** 1:1, gi
 | **AMD-NR Core** | `enable_nr` | `BOOLEAN` | `True` | Master toggle to enable or bypass DLSS 5 Neural Rendering. |
 | **AMD-NR Core** | `neural_runtime` | `danielblnc 0.5.1` \| `lmxxf` | `danielblnc 0.5.1` | AMD neural engine (danielblnc native HIP kernels or lmxxf runtime). |
 | **AMD-NR Core** | `upscaling_mode` | `1x` .. `3x`, `1K`, `2K`, `4K`, `8K` | `1x (Native / DLAA)` | Upscaling factor or auto-fit resolution target. |
-| **AMD-NR Core** | `nr_style` | `Default`, `Cinematic`, `Crisp`, `Natural`, `Vivid`, `Custom` | `Default` | Pre-configured style profiles (or `Custom` to use manual sliders below). |
-| **Performance** | `neural_placement` | `Before upscaling` \| `After upscaling` | `Before upscaling` | Stage at which Neural Rendering executes relative to spatial upscaling. |
+| **AMD-NR Core** | `nr_style` | `Full Model Look`, `NVIDIA look`, `AMDNR soft`, `Cinematic`, `Crisp`, `Natural`, `Vivid`, `Custom` | `Full Model Look` | AMDNR v0.3.5.6 style profiles (Full Model Look is default; or `Custom` for manual sliders). |
+| **Performance** | `neural_placement` | `After upscaling` \| `Before upscaling` | `After upscaling` | Stage at which Neural Rendering executes (After upscaling is default for Full Model Look). |
 | **Performance** | `nr_resolution` | `INT` (10 - 200%) | `100` | Working resolution percentage for the neural network. |
 | **Performance** | `neural_passes` | `INT` (1 - 3) | `1` | Number of neural refinement passes (1 = fast pass, 2-3 = deeper detail). |
-| **Performance** | `full_network` | `BOOLEAN` | `False` | Run the complete 71-block neural model (lmxxf runtime). |
+| **Performance** | `full_network` | `BOOLEAN` | `True` | Run the complete 71-block neural model (lmxxf runtime). |
 | **Performance** | `fast_mode` | `BOOLEAN` | `False` | Enable low-latency execution path. |
 | **Performance** | `dynamic_nr_resolution` | `BOOLEAN` | `False` | Dynamically scale neural resolution under load. |
 | **Performance** | `model_interleave` | `Off` \| `On` | `Off` | Interleave neural evaluations across alternating frames. |

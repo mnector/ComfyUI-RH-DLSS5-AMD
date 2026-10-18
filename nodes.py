@@ -108,22 +108,25 @@ def _build_params(kwargs: dict) -> dict:
             scale = 1.0
         common.check_runtime_files(runtime, scale, is_zluda=is_zluda)
 
-    nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Default"
+    nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Full Model Look"
     presets = {
-        "Cinematic": {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Crisp":     {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Natural":   {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Vivid":     {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Default":   {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "NVIDIA look":     {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": True},
+        "AMDNR soft":      {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": False},
+        "Cinematic":       {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Crisp":           {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Natural":         {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Vivid":           {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
+        "Default":         {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
     }
     preset_vals = presets.get(nr_style, {})
 
     enable_nr = bool(kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True)))
     neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "danielblnc 0.5.1")))
-    neural_placement = str(kwargs.get("neural_placement", kwargs.get("Neural placement", "Before upscaling")))
+    neural_placement = str(kwargs.get("neural_placement", preset_vals.get("neural_placement", kwargs.get("Neural placement", "After upscaling"))))
     nr_resolution = int(kwargs.get("nr_resolution", kwargs.get("NR resolution (%)", 100)))
     neural_passes = int(kwargs.get("neural_passes", kwargs.get("Neural passes", 1)))
-    full_network = bool(kwargs.get("full_network", kwargs.get("Full network (all 71 blocks)", False)))
+    full_network = bool(kwargs.get("full_network", preset_vals.get("full_network", kwargs.get("Full network (all 71 blocks)", True))))
     fast_mode = bool(kwargs.get("fast_mode", kwargs.get("Fast mode", False)))
     dynamic_nr_resolution = bool(kwargs.get("dynamic_nr_resolution", kwargs.get("Dynamic NR resolution", False)))
     model_interleave = str(kwargs.get("model_interleave", kwargs.get("Model interleave", "Off")))
@@ -332,13 +335,13 @@ class RH_DLSS5Enhance_AMD:
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD (danielblnc native HIP kernels or lmxxf runtime)."}),
                 "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Upscaling carrier resolution (1x enhances at native size; fixed factors upscale with FSR/DLSS before/after neural pass; 1K/2K/4K/8K auto-fit short edge)."}),
-                "nr_style": (["Default", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Default", "tooltip": "AMD-NR style tuning presets: Cinematic (deep contrast/shadows), Crisp (maximum edge definition & CAS clarity), Natural (faithful micro-textures), Vivid (punchy chroma/highlights), Default, or Custom (uses slider values below)."}),
+                "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "AMD-NR v0.3.5.6 style presets: Full Model Look (default in 0.3.5.6: After upscaling + Full network + Structure 2.00 + Temporal stability 0.50), NVIDIA look (Before upscaling + Full network), AMDNR soft (Before upscaling + Full network off), Cinematic, Crisp, Natural, Vivid, or Custom."}),
 
                 # Performance
-                "neural_placement": (["Before upscaling", "After upscaling"], {"default": "Before upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass."}),
+                "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass (After upscaling is default for Full Model Look in AMDNR v0.3.5.6)."}),
                 "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5, "tooltip": "NR working resolution percentage (100% = full render size)."}),
                 "neural_passes": ("INT", {"default": 1, "min": 1, "max": 3, "step": 1, "tooltip": "Number of neural refinement passes (1 = default fast pass, 2-3 = deeper reconstruction)."}),
-                "full_network": ("BOOLEAN", {"default": False, "tooltip": "Run full 71-block neural network (lmxxf runtime only)."}),
+                "full_network": ("BOOLEAN", {"default": True, "tooltip": "Run full 71-block neural network (lmxxf runtime)."}),
                 "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Enable fast execution mode for higher throughput."}),
                 "dynamic_nr_resolution": ("BOOLEAN", {"default": False, "tooltip": "Dynamic neural rendering resolution scaling."}),
                 "model_interleave": (["Off", "On"], {"default": "Off", "tooltip": "Interleave neural model evaluations across frames."}),
