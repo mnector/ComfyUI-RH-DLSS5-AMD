@@ -357,7 +357,7 @@ class RH_DLSS5Enhance_AMD:
                 # Motion, Audio & Backend
                 "motion": (["auto", "optical_flow", "none"], {"default": "auto", "tooltip": "Motion vector generation: auto and optical_flow compute dense motion via OpenCV DIS internally without user input."}),
                 "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Preserve original audio in VIDEO output."}),
-                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge", "tooltip": "Execution backend: amd_nr_bridge executes via D3D12/OptiScaler bridge (supports all AMD-NR DLLs); zluda_tensor executes via PyTorch on AMD GPU."}),
+                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge", "tooltip": "Execution backend: amd_nr_bridge runs the real DLSS-NR neural network via D3D12/OptiScaler (danielblnc HIP kernels / lmxxf runtime); zluda_tensor is a pure PyTorch GPU heuristic fallback."}),
                 "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional custom path to DLSS5/AMD-NR runtime folder (empty = ComfyUI/models/dlss5/)."}),
             },
         }

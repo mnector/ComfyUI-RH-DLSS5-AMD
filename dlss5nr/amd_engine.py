@@ -122,6 +122,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdDetailStrength", f"{detail_str:.4f}")
             config.set("DlssNr", "AmdColourStrength", f"{colour_str:.4f}")
             config.set("DlssNr", "AmdComposition", composition)
+            config.set("DlssNr", "AmdDeviceGate", "false")
 
             # [AmdLook]
             if not config.has_section("AmdLook"):
