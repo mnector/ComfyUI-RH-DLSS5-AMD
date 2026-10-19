@@ -92,7 +92,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", 1.00)))
     colour_str = float(params.get("colour_strength", preset_dict.get("colour_strength", 1.00)))
     
-    placement = "1" if "after" in str(params.get("neural_placement", preset_dict.get("neural_placement", "After"))).lower() else "0"
+    placement = "post" if "after" in str(params.get("neural_placement", preset_dict.get("neural_placement", "After"))).lower() else "pre"
     working_scale = float(params.get("nr_resolution", 100)) / 100.0
     passes = int(params.get("neural_passes", 1))
     full_net = bool(params.get("full_network", preset_dict.get("full_network", True)))
@@ -136,6 +136,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdColourStrength", f"{colour_str:.4f}")
             config.set("DlssNr", "AmdComposition", composition)
             config.set("DlssNr", "AmdDeviceGate", "false")
+            config.set("DlssNr", "AmdBootstrapQueue", "true")
             config.set("DlssNr", "AmdFaceDetail", "true")
 
             # [AmdLook]
@@ -242,7 +243,7 @@ class AmdBridgeDaemon:
         self.a_bin = self.tmp_path / "a.bin"
         self.o_bin = self.tmp_path / "o.bin"
         self.proc: Optional[subprocess.Popen] = None
-        self.warmup_passes = max(1, int(params.get("warmup_frames", 1)))
+        self.warmup_passes = max(8, int(params.get("warmup_frames", 8)))
         self.eval_passes = max(1, int(params.get("neural_passes", 1)))
         self.fps = 30
         self.frametime = 0.033

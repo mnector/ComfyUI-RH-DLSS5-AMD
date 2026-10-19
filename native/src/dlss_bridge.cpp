@@ -301,18 +301,7 @@ int main(int argc, char** argv) {
     std::string colorPath = argv[5], depthPath = argv[6], mvecPath = argv[7];
     std::string outputPath = argv[8], normalPath = argv[10], albedoPath = argv[11];
 
-    // --- Load and Patch DLLs ---
-    LOG("=== Loading Neural Rendering DLLs ===");
-    for (int p = 1; p <= 3; ++p) {
-        std::string dllName = "dlssnr_amd_pass" + std::to_string(p) + ".dll";
-        HMODULE hPass = LoadLibraryA(dllName.c_str());
-        if (hPass) {
-            g_PassModules[p - 1] = hPass;
-            PatchPassModule(hPass, dllName.c_str());
-        } else {
-            LOG("FAILED to load " << dllName);
-        }
-    }
+    // OptiScaler (AmdPreSr) manages, loads, patches, and isolates dlssnr_amd_pass*.dll / LmxxfNrRuntime.dll dynamically.
 
 
     // --- Read initial frame data ---
