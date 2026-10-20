@@ -41,6 +41,7 @@ venv/
 # Whitelist bundled open-source host & bridge shims from upstream
 !native/bin/dlss5nr_bridge.dll
 !native/bin/dlss5nr_host.exe
+!native/bin/dlss_bridge.exe
 !runtime/caller/nvngx.dll_comfy.dll
 
 # Runtime folder contents (user-supplied weights/runtimes strictly excluded)

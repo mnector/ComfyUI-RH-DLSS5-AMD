@@ -252,7 +252,6 @@ void RunOneEvalPass(
     pParams->Set(NVSDK_NGX_Parameter_Reset, resetHistory ? 1 : 0);
 
     TransitionResource(g_pCommandList, pOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TransitionResource(g_pCommandList, pColor, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Halton(2,3) jitter
     float f2 = 1.0f, r2 = 0.0f; int idx2 = frameIndex + 1;
@@ -268,7 +267,6 @@ void RunOneEvalPass(
     }
 
     TransitionResource(g_pCommandList, pOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    TransitionResource(g_pCommandList, pColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     g_pCommandList->Close();
     g_pCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&g_pCommandList);
@@ -278,6 +276,48 @@ void RunOneEvalPass(
     if (pSwapChain) pSwapChain->Present(0, 0);
 
     WaitForGPU();
+}
+
+// Detect HIP device 0 LUID to bind D3D12 device to the identical physical GPU adapter
+bool GetHipDeviceLuid(LUID* outLuid) {
+    if (!outLuid) return false;
+    HMODULE hHip = LoadLibraryA("amdhip64_7.dll");
+    if (!hHip) hHip = LoadLibraryA("amdhip64.dll");
+    if (!hHip) return false;
+
+    typedef int (*pfn_hipInit)(unsigned int);
+    typedef int (*pfn_hipGetDeviceCount)(int*);
+    typedef int (*pfn_hipGetDevicePropertiesR0600)(void*, int);
+
+    auto pfnInit = (pfn_hipInit)GetProcAddress(hHip, "hipInit");
+    auto pfnCount = (pfn_hipGetDeviceCount)GetProcAddress(hHip, "hipGetDeviceCount");
+    auto pfnProps = (pfn_hipGetDevicePropertiesR0600)GetProcAddress(hHip, "hipGetDevicePropertiesR0600");
+
+    if (!pfnInit || !pfnCount || !pfnProps) {
+        FreeLibrary(hHip);
+        return false;
+    }
+
+    pfnInit(0);
+    int devCount = 0;
+    if (pfnCount(&devCount) != 0 || devCount <= 0) {
+        FreeLibrary(hHip);
+        return false;
+    }
+
+    std::vector<uint8_t> propBuf(8192, 0);
+    if (pfnProps(propBuf.data(), 0) == 0) {
+        // LUID is located at offset 272 (0x110) in hipDeviceProp_t (R0600)
+        LUID* pLuid = (LUID*)(propBuf.data() + 272);
+        if (pLuid->LowPart != 0 || pLuid->HighPart != 0) {
+            *outLuid = *pLuid;
+            FreeLibrary(hHip);
+            return true;
+        }
+    }
+
+    FreeLibrary(hHip);
+    return false;
 }
 
 // =====================================================================
@@ -317,13 +357,38 @@ int main(int argc, char** argv) {
     IDXGIFactory4* pFactory = nullptr;
     CreateDXGIFactory1(IID_PPV_ARGS(&pFactory));
 
+    LUID hipLuid = {};
+    bool hasHipLuid = GetHipDeviceLuid(&hipLuid);
+    if (hasHipLuid) {
+        LOG("Detected active HIP device LUID: 0x" << std::hex << hipLuid.HighPart << ":" << hipLuid.LowPart << std::dec);
+    }
+
     IDXGIAdapter1* pAdapter = nullptr;
+    IDXGIAdapter1* pFallbackAdapter = nullptr;
+
     for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 desc; pAdapter->GetDesc1(&desc);
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { pAdapter->Release(); pAdapter = nullptr; continue; }
-        break;
+
+        if (hasHipLuid && desc.AdapterLuid.LowPart == hipLuid.LowPart && desc.AdapterLuid.HighPart == hipLuid.HighPart) {
+            LOG("Selected matching DXGI Adapter " << i << " for HIP device: " << desc.Description
+                << " (LUID 0x" << std::hex << desc.AdapterLuid.HighPart << ":" << desc.AdapterLuid.LowPart << std::dec << ")");
+            if (pFallbackAdapter) { pFallbackAdapter->Release(); pFallbackAdapter = nullptr; }
+            break;
+        }
+
+        if (!pFallbackAdapter) {
+            pFallbackAdapter = pAdapter;
+        } else {
+            pAdapter->Release();
+        }
+        pAdapter = nullptr;
     }
-    if (!pAdapter) { LOG("No hardware adapter"); return 1; }
+
+    if (!pAdapter) {
+        pAdapter = pFallbackAdapter;
+    }
+    if (!pAdapter) { LOG("No hardware adapter found"); return 1; }
 
     HRESULT hr = D3D12CreateDevice(pAdapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&g_pDevice));
     if (FAILED(hr)) { LOG("D3D12 Device creation failed"); return 1; }
@@ -518,18 +583,29 @@ int main(int argc, char** argv) {
     g_pCommandList->Close();
     ID3D12CommandList* dl[] = { g_pCommandList }; g_pCommandQueue->ExecuteCommandLists(1, dl); WaitForGPU();
 
-    // =====================================================================
-    // WARMUP: Run evaluation passes with initial data to fully warm GPU
-    // =====================================================================
-    LOG("=== Running " << warmup_passes << " warmup passes ===");
-    for (int i = 0; i < warmup_passes; ++i) {
-        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, i, i == 0);
-        Sleep(33); // ~30fps pacing during warmup
-    }
-    g_TotalFramesProcessed = warmup_passes;
-    LOG("Warmup complete. GPU is hot.");
+    // Allow OptiScaler resolution change timer (300ms) to settle
+    Sleep(350);
 
-    // Download initial output (this is the result of warmup with the first frame's data)
+    // =====================================================================
+    // WARMUP: Run evaluation passes with initial data to fully settle OptiScaler + AMD-NR
+    // =====================================================================
+    int totalWarmup = max(6, warmup_passes);
+    LOG("=== Running " << totalWarmup << " warmup passes to settle OptiScaler + AMD-NR ===");
+    for (int i = 0; i < totalWarmup; ++i) {
+        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, i, i == 0);
+        Sleep(50); // Pacing at 50ms ensures 300ms window and settle counter (>=2) are satisfied
+    }
+    g_TotalFramesProcessed = totalWarmup;
+    LOG("Warmup complete. OptiScaler and AMD-NR are settled and hot.");
+
+    // Run active neural evaluation passes for Frame 0
+    LOG("=== Running " << passes << " active neural evaluation passes for Frame 0 ===");
+    for (int i = 0; i < passes; ++i) {
+        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, g_TotalFramesProcessed + i, false);
+    }
+    g_TotalFramesProcessed += passes;
+
+    // Download initial output (now fully enhanced by DLSS 5 / AMD-NR)
     g_pCommandAllocator->Reset(); g_pCommandList->Reset(g_pCommandAllocator, nullptr);
     TransitionResource(g_pCommandList, pOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
     g_pCommandList->Close();
