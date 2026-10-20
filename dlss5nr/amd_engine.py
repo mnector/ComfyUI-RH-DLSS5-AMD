@@ -123,7 +123,12 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdNeuralLightingStrength", "1")
             config.set("DlssNr", "AmdSkipUnwrittenFrames", "false")
             config.set("DlssNr", "AmdHoldResize", "false")
+            config.set("DlssNr", "AmdUseGameExposure", "0")
             config.set("DlssNr", "ScanExposure", "false")
+            if config.has_option("DlssNr", "Scale"):
+                config.remove_option("DlssNr", "Scale")
+            if config.has_option("DlssNr", "Residual"):
+                config.remove_option("DlssNr", "Residual")
             config.set("DlssNr", "WorkingScale", f"{working_scale:.2f}")
             config.set("DlssNr", "Passes", str(passes))
             config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
@@ -282,7 +287,9 @@ class AmdBridgeDaemon:
         self.a_bin = self.tmp_path / "a.bin"
         self.o_bin = self.tmp_path / "o.bin"
         self.proc: Optional[subprocess.Popen] = None
-        self.warmup_passes = max(8, int(params.get("warmup_frames", 8)))
+        self.warmup_passes = max(0, int(params.get("warmup_passes", params.get("warmup_frames", 8))))
+        self.settle_pause_ms = max(0, int(params.get("settle_pause_ms", 350)))
+        self.warmup_interval_ms = max(0, int(params.get("warmup_interval_ms", 50)))
         self.eval_passes = max(1, int(params.get("neural_passes", 1)))
         self.fps = 30
         self.frametime = 0.033
@@ -364,6 +371,7 @@ class AmdBridgeDaemon:
             str(self.c_bin), str(self.d_bin), str(self.m_bin), str(self.o_bin),
             str(self.eval_passes), str(self.n_bin), str(self.a_bin),
             str(self.fps), str(self.frametime), str(self.warmup_passes),
+            str(self.settle_pause_ms), str(self.warmup_interval_ms),
         ]
         print(f"[RH-DLSS5-AMD] Starting persistent AMD-NR D3D12 bridge: {self.bridge_exe.name} "
               f"({self.input_w}x{self.input_h} -> {self.output_w}x{self.output_h})", flush=True)

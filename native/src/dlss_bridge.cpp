@@ -339,6 +339,8 @@ int main(int argc, char** argv) {
     int target_fps = std::stoi(argv[12]);
     float process_time_sec = std::stof(argv[13]);
     int warmup_passes = std::stoi(argv[14]);
+    int settle_pause_ms = (argc > 15) ? std::stoi(argv[15]) : 350;
+    int warmup_interval_ms = (argc > 16) ? std::stoi(argv[16]) : 50;
 
     std::string colorPath = argv[5], depthPath = argv[6], mvecPath = argv[7];
     std::string outputPath = argv[8], normalPath = argv[10], albedoPath = argv[11];
@@ -583,19 +585,23 @@ int main(int argc, char** argv) {
     g_pCommandList->Close();
     ID3D12CommandList* dl[] = { g_pCommandList }; g_pCommandQueue->ExecuteCommandLists(1, dl); WaitForGPU();
 
-    // Allow OptiScaler resolution change timer (300ms) to settle
-    Sleep(350);
+    // User-controlled settlement pause before warmup passes
+    if (settle_pause_ms > 0) {
+        LOG("Applying user settlement pause: " << std::dec << settle_pause_ms << " ms");
+        Sleep(settle_pause_ms);
+    }
 
     // =====================================================================
     // WARMUP: Run evaluation passes with initial data to fully settle OptiScaler + AMD-NR
     // =====================================================================
-    int totalWarmup = max(6, warmup_passes);
-    LOG("=== Running " << totalWarmup << " warmup passes to settle OptiScaler + AMD-NR ===");
-    for (int i = 0; i < totalWarmup; ++i) {
+    LOG("=== Running " << std::dec << warmup_passes << " warmup passes (interval: " << warmup_interval_ms << " ms) ===");
+    for (int i = 0; i < warmup_passes; ++i) {
         RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, i, i == 0);
-        Sleep(50); // Pacing at 50ms ensures 300ms window and settle counter (>=2) are satisfied
+        if (warmup_interval_ms > 0) {
+            Sleep(warmup_interval_ms);
+        }
     }
-    g_TotalFramesProcessed = totalWarmup;
+    g_TotalFramesProcessed = warmup_passes;
     LOG("Warmup complete. OptiScaler and AMD-NR are settled and hot.");
 
     // Run active neural evaluation passes for Frame 0
