@@ -18,6 +18,12 @@ from .dlss5nr.common import DLSS5Error
 from .dlss5nr.decoder import ChunkedVideoReader, build_source
 from .dlss5nr.motion import TemporalGuideGenerator, sample_u8
 
+_UPSCALE_METHODS = [
+    "FSR (AMD FidelityFX)",
+    "XeSS (Intel XeSS)",
+    "DLSS (NVIDIA DLSS)",
+]
+
 _UPSCALE_MODES = [
     "1x (DLAA / native)",
     "1.5x (Quality)",
@@ -89,6 +95,18 @@ def _build_params(kwargs: dict) -> dict:
     backend = kwargs.get("backend") or kwargs.get("amd_backend") or "amd_nr_bridge"
     is_zluda = (backend == "zluda_tensor")
 
+    raw_method = str(kwargs.get("upscale_method", "FSR")).strip()
+    raw_lower = raw_method.lower()
+    if "xess" in raw_lower or "intel" in raw_lower:
+        dx12_upscaler = "xess"
+        method_label = "XeSS (Intel XeSS)"
+    elif "dlss" in raw_lower or "nvidia" in raw_lower:
+        dx12_upscaler = "dlss"
+        method_label = "DLSS (NVIDIA DLSS)"
+    else:
+        dx12_upscaler = "ffx"
+        method_label = "FSR (AMD FidelityFX)"
+
     runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=is_zluda)
     mode_name = str(mode).strip()
     auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
@@ -149,6 +167,9 @@ def _build_params(kwargs: dict) -> dict:
         "is_zluda": is_zluda,
         "backend": backend,
         "amd_backend": backend,
+        "dx12_upscaler": dx12_upscaler,
+        "upscale_method": method_label,
+        "upscale_method_label": method_label,
         "gpu_index": gpu_index,
         "scale": None if auto_bucket is not None else scale,
         "auto_bucket": auto_bucket,
@@ -372,7 +393,8 @@ class RH_DLSS5Enhance_AMD:
                 # AMD-NR Core
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD (danielblnc native HIP kernels or lmxxf runtime)."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Upscaling carrier resolution (1x enhances at native size; fixed factors upscale with FSR/DLSS before/after neural pass; 1K/2K/4K/8K auto-fit short edge)."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), or DLSS (NVIDIA DLSS via translation)."}),
+                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Upscaling carrier resolution (1x enhances at native size; fixed factors upscale with FSR/DLSS/XeSS before/after neural pass; 1K/2K/4K/8K auto-fit short edge)."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "AMD-NR v0.3.5.6 style presets: Full Model Look (default in 0.3.5.6: After upscaling + Full network + Structure 2.00 + Temporal stability 0.50), NVIDIA look (Before upscaling + Full network), AMDNR soft (Before upscaling + Full network off), Cinematic, Crisp, Natural, Vivid, or Custom."}),
 
                 # Performance
@@ -490,6 +512,8 @@ class RH_DLSS5Enhance_AMD:
         out_video = None
         notes: list[str] = []
 
+        method_label = params.get("upscale_method_label", "FSR (AMD FidelityFX)")
+
         if image is not None:
             img_params, auto_note = _resolve_auto_scale(params, int(image.shape[2]), int(image.shape[1]))
             if is_zluda:
@@ -498,7 +522,7 @@ class RH_DLSS5Enhance_AMD:
                 result, iw, ih, ow, oh, order, engine = _run_frames(image, img_params, backend_name)
             out_image = result
             notes.append(
-                f"IMAGE {int(image.shape[0])} frames {iw}x{ih}->{ow}x{oh} via {backend_name} "
+                f"IMAGE {int(image.shape[0])} frames {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) "
                 f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note})"
                 + (f"; {auto_note}" if auto_note else "")
             )
@@ -529,7 +553,7 @@ class RH_DLSS5Enhance_AMD:
                         source_video=video if keep_audio else None)
                 out_video = video_obj
                 notes.append(
-                    f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
+                    f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) "
                     f"(chunked decode, streaming encode, channel {order}, motion {engine}"
                     f"{', hdr' if params['hdr'] else ''}{gt_note})"
                     + (f"; {auto_note}" if auto_note else "")
@@ -552,7 +576,7 @@ class RH_DLSS5Enhance_AMD:
                 )
                 out_video = video_obj
                 notes.append(
-                    f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} "
+                    f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) "
                     f"(channel {order}, motion {engine}{', hdr' if params['hdr'] else ''}{gt_note}); {note}"
                     + (f"; {auto_note}" if auto_note else "")
                 )
@@ -973,6 +997,7 @@ class RH_DLSS5ImageEnhance_AMD:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Input image or image batch (RGB float32 0-1)."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4 via amd_fidelityfx_upscaler_dx12.dll), XeSS (Intel XeSS 1.3 via libxess.dll with DP4a), or DLSS (NVIDIA DLSS via nvngx_dlss.dll / DLSS Enabler)."}),
                 "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native resolution (DLAA); 1.5x/1.724x/2x/3x upscale; 1K/2K/4K/8K auto-fit short edge."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs."}),
@@ -1046,7 +1071,8 @@ class RH_DLSS5ImageEnhance_AMD:
                 image, img_params, backend_name, depthmaps=depthmap, normals=surface_normal, albedos=albedo
             )
 
-        note = f"IMAGE {int(image.shape[0])} frame(s) {iw}x{ih}->{ow}x{oh} via {backend_name} (channel {order}, motion {engine})"
+        method_label = img_params.get("upscale_method_label", "FSR (AMD FidelityFX)")
+        note = f"IMAGE {int(image.shape[0])} frame(s) {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) (channel {order}, motion {engine})"
         if auto_note:
             note += f"; {auto_note}"
         return result, note
@@ -1065,6 +1091,7 @@ class RH_DLSS5VideoEnhance_AMD:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "Video frames batch [Batch, H, W, C]."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4), XeSS (Intel XeSS 1.3), or DLSS (NVIDIA DLSS via translation)."}),
                 "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Carrier upscaling resolution."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1"}),
@@ -1155,7 +1182,8 @@ class RH_DLSS5VideoEnhance_AMD:
                     reader, fps, vid_params, backend_name, source_video=video if keep_audio else None, audio_input=kwargs.get("audio")
                 )
             out_video = video_obj
-            notes.append(f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} (chunked decode, motion {engine})")
+            method_label = vid_params.get("upscale_method_label", "FSR (AMD FidelityFX)")
+            notes.append(f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) (chunked decode, motion {engine})")
         else:
             frames = images
             if frames is None and video is not None:
@@ -1191,7 +1219,8 @@ class RH_DLSS5VideoEnhance_AMD:
 
             video_obj, vnote = build_video(result, fps, audio_source, video if keep_audio else None)
             out_video = video_obj
-            notes.append(f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} (channel {order}, motion {engine}); {vnote}")
+            method_label = vid_params.get("upscale_method_label", "FSR (AMD FidelityFX)")
+            notes.append(f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) (channel {order}, motion {engine}); {vnote}")
 
         return out_image, out_video, " | ".join(notes)
 

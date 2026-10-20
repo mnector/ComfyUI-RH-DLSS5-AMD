@@ -149,7 +149,14 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             # [Upscalers]
             if not config.has_section("Upscalers"):
                 config.add_section("Upscalers")
-            config.set("Upscalers", "Dx12Upscaler", "ffx")
+            dx12_carrier = str(params.get("dx12_upscaler", params.get("upscale_method", "ffx"))).lower()
+            if "xess" in dx12_carrier or "intel" in dx12_carrier:
+                target_carrier = "xess"
+            elif "dlss" in dx12_carrier or "nvidia" in dx12_carrier:
+                target_carrier = "dlss"
+            else:
+                target_carrier = "ffx"
+            config.set("Upscalers", "Dx12Upscaler", target_carrier)
 
             # [Spoofing] - CRITICAL: Never spoof Dxgi or Nvidia vendor on AMD GPUs,
             # otherwise OptiScaler IsAmd check fails and skips all AMD HIP passes!
@@ -449,7 +456,23 @@ def amd_bridge_process_frames(
             "Run 'python setup_amd_runtime.py' to import AMD runtime binaries."
         )
 
-    daemon = AmdBridgeDaemon(bridge_exe, input_w, input_h, output_w, output_h, runtime, params)
+    # 64-pixel alignment for D3D12 / DP4a hardware neural tensor pipelines
+    pad_h = (64 - (input_h % 64)) % 64
+    pad_w = (64 - (input_w % 64)) % 64
+    needs_padding = (pad_h > 0 or pad_w > 0)
+
+    if needs_padding:
+        scale_x = float(output_w) / float(input_w)
+        scale_y = float(output_h) / float(input_h)
+        proc_in_w = input_w + pad_w
+        proc_in_h = input_h + pad_h
+        proc_out_w = int(round(proc_in_w * scale_x))
+        proc_out_h = int(round(proc_in_h * scale_y))
+    else:
+        proc_in_w, proc_in_h = input_w, input_h
+        proc_out_w, proc_out_h = output_w, output_h
+
+    daemon = AmdBridgeDaemon(bridge_exe, proc_in_w, proc_in_h, proc_out_w, proc_out_h, runtime, params)
     total = int(params.get("frame_count", 1))
     try:
         for index, item in enumerate(frames):
@@ -459,14 +482,29 @@ def amd_bridge_process_frames(
             else:
                 pixels_u8, motion, reset, d_frame, n_frame, a_frame = item
 
+            orig_u8 = pixels_u8
+            if needs_padding:
+                pixels_u8 = np.pad(pixels_u8, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+                if motion is not None:
+                    motion = np.pad(motion, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant", constant_values=0)
+                if d_frame is not None:
+                    d_frame = np.pad(d_frame, ((0, pad_h), (0, pad_w)), mode="edge") if d_frame.ndim == 2 else np.pad(d_frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+                if n_frame is not None:
+                    n_frame = np.pad(n_frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge") if n_frame.ndim == 3 else np.pad(n_frame, ((0, pad_h), (0, pad_w)), mode="edge")
+                if a_frame is not None:
+                    a_frame = np.pad(a_frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge") if a_frame.ndim == 3 else np.pad(a_frame, ((0, pad_h), (0, pad_w)), mode="edge")
+
             if index == 0:
                 out = daemon.start_and_process_first(pixels_u8, motion, d_frame, n_frame, a_frame)
             else:
                 out = daemon.process_next_frame(pixels_u8, motion, d_frame, n_frame, a_frame)
 
+            if needs_padding:
+                out = out[:output_h, :output_w]
+
             if params.get("detail", 1.0) != 1.0 or params.get("color", 1.0) != 1.0:
                 out = common.nr_composite(
-                    pixels_u8, out, params["detail"], params["color"],
+                    orig_u8, out, params["detail"], params["color"],
                     out_is_linear=bool(params.get("hdr")), encode=not params.get("hdr"),
                 )
             if progress_callback is not None:
