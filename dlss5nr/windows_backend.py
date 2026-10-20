@@ -132,7 +132,8 @@ def process_frames(frames, input_w: int, input_h: int, output_w: int, output_h: 
     error = ctypes.create_string_buffer(4096)
     total = int(params["frame_count"])
     with _worker_lock:
-        for index, (pixels_u8, motion, reset) in enumerate(frames):
+        for index, item in enumerate(frames):
+            pixels_u8, motion, reset = item[0], item[1], item[2]
             source = np.ascontiguousarray(pixels_u8, dtype=np.float32) / 255.0
             if params.get("hdr"):
                 source = common.srgb_to_linear(source)

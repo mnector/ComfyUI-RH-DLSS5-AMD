@@ -214,6 +214,35 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
 # AmdBridgeDaemon: Out-of-process D3D12/OptiScaler bridge daemon
 # -----------------------------------------------------------------------------
 
+def compute_motion_from_video(motion_video: torch.Tensor, target_w: int, target_h: int) -> np.ndarray:
+    """Computes real 3D camera-parallax optical flow from a 2-3 frame video (e.g. Depthflow Dolly)."""
+    import cv2
+    if motion_video is None or len(motion_video) < 2:
+        return np.zeros((target_h, target_w, 2), dtype=np.float16)
+
+    # Frame 0 and Frame 1
+    f0 = (motion_video[0].detach().cpu().numpy() * 255.0).astype(np.uint8)
+    f1 = (motion_video[1].detach().cpu().numpy() * 255.0).astype(np.uint8)
+    if f0.ndim == 3 and f0.shape[-1] > 3:
+        f0 = f0[..., :3]
+    if f1.ndim == 3 and f1.shape[-1] > 3:
+        f1 = f1[..., :3]
+
+    g0 = cv2.cvtColor(f0, cv2.COLOR_RGB2GRAY)
+    g1 = cv2.cvtColor(f1, cv2.COLOR_RGB2GRAY)
+
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+    dis.setUseSpatialPropagation(True)
+    flow = dis.calc(g0, g1, None)
+
+    if (g0.shape[1], g0.shape[0]) != (target_w, target_h):
+        flow = cv2.resize(flow, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        flow[..., 0] *= (target_w / float(g0.shape[1]))
+        flow[..., 1] *= (target_h / float(g0.shape[0]))
+
+    return np.ascontiguousarray(flow.astype(np.float16))
+
+
 class AmdBridgeDaemon:
     """Persistent out-of-process D3D12 bridge daemon executing OptiScaler + AMD-NR."""
 
@@ -248,7 +277,14 @@ class AmdBridgeDaemon:
         self.fps = 30
         self.frametime = 0.033
 
-    def _write_frame_inputs(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray):
+    def _write_frame_inputs(
+        self,
+        pixels_u8: np.ndarray,
+        motion_fp16: np.ndarray,
+        depth_f32: Optional[np.ndarray] = None,
+        normal_fp16: Optional[np.ndarray] = None,
+        albedo_fp16: Optional[np.ndarray] = None,
+    ):
         h, w = pixels_u8.shape[:2]
         # Color: RGBA FP16
         color_rgba = np.empty((h, w, 4), dtype=np.float16)
@@ -256,24 +292,61 @@ class AmdBridgeDaemon:
         color_rgba[..., 3] = 1.0
         color_rgba.tofile(str(self.c_bin))
 
-        # Depth: Constant 0.5 FP32 (mid-plane neutral depth)
-        depth_f32 = np.full((h, w, 1), 0.5, dtype=np.float32)
-        depth_f32.tofile(str(self.d_bin))
+        # Depth: Real Depth if provided, else neutral mid-plane 0.5 FP32
+        if depth_f32 is not None:
+            d_arr = np.ascontiguousarray(depth_f32, dtype=np.float32)
+            if d_arr.ndim == 2:
+                d_arr = d_arr[..., None]
+            elif d_arr.ndim == 3 and d_arr.shape[-1] > 1:
+                d_arr = d_arr[..., :1]
+            if d_arr.shape[:2] != (h, w):
+                import cv2
+                d_arr = cv2.resize(d_arr.squeeze(-1), (w, h), interpolation=cv2.INTER_LINEAR)[..., None].astype(np.float32)
+            d_arr.tofile(str(self.d_bin))
+        else:
+            depth_const = np.full((h, w, 1), 0.5, dtype=np.float32)
+            depth_const.tofile(str(self.d_bin))
 
         # Motion vectors: RG FP16
         mvec_rg = np.ascontiguousarray(motion_fp16, dtype=np.float16)
         mvec_rg.tofile(str(self.m_bin))
 
-        # Normal: Flat (0, 0, 1, 0) FP16
-        normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
-        normal_rgba[..., 2] = 1.0
-        normal_rgba.tofile(str(self.n_bin))
+        # Normal: Real Normal if provided, else flat (0, 0, 1, 0) FP16
+        if normal_fp16 is not None:
+            n_arr = np.ascontiguousarray(normal_fp16, dtype=np.float32)
+            if n_arr.shape[:2] != (h, w):
+                import cv2
+                n_arr = cv2.resize(n_arr, (w, h), interpolation=cv2.INTER_LINEAR)
+            normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
+            normal_rgba[..., :3] = n_arr[..., :3].astype(np.float16)
+            normal_rgba.tofile(str(self.n_bin))
+        else:
+            normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
+            normal_rgba[..., 2] = 1.0
+            normal_rgba.tofile(str(self.n_bin))
 
-        # Albedo: copy of color
-        color_rgba.tofile(str(self.a_bin))
+        # Albedo: Real Albedo if provided, else copy of color
+        if albedo_fp16 is not None:
+            a_arr = np.ascontiguousarray(albedo_fp16, dtype=np.float32)
+            if a_arr.shape[:2] != (h, w):
+                import cv2
+                a_arr = cv2.resize(a_arr, (w, h), interpolation=cv2.INTER_LINEAR)
+            albedo_rgba = np.zeros((h, w, 4), dtype=np.float16)
+            albedo_rgba[..., :3] = a_arr[..., :3].astype(np.float16)
+            albedo_rgba[..., 3] = 1.0
+            albedo_rgba.tofile(str(self.a_bin))
+        else:
+            color_rgba.tofile(str(self.a_bin))
 
-    def start_and_process_first(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray) -> np.ndarray:
-        self._write_frame_inputs(pixels_u8, motion_fp16)
+    def start_and_process_first(
+        self,
+        pixels_u8: np.ndarray,
+        motion_fp16: np.ndarray,
+        depth_f32: Optional[np.ndarray] = None,
+        normal_fp16: Optional[np.ndarray] = None,
+        albedo_fp16: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        self._write_frame_inputs(pixels_u8, motion_fp16, depth_f32, normal_fp16, albedo_fp16)
         cmd = [
             str(self.bridge_exe),
             str(self.input_w), str(self.input_h),
@@ -307,10 +380,17 @@ class AmdBridgeDaemon:
         out_raw = np.fromfile(str(self.o_bin), dtype=np.float16).reshape((self.output_h, self.output_w, 4))
         return out_raw[..., :3].astype(np.float32)
 
-    def process_next_frame(self, pixels_u8: np.ndarray, motion_fp16: np.ndarray) -> np.ndarray:
+    def process_next_frame(
+        self,
+        pixels_u8: np.ndarray,
+        motion_fp16: np.ndarray,
+        depth_f32: Optional[np.ndarray] = None,
+        normal_fp16: Optional[np.ndarray] = None,
+        albedo_fp16: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         if self.proc is None or self.proc.poll() is not None:
             raise RuntimeError("AMD-NR bridge is not running")
-        self._write_frame_inputs(pixels_u8, motion_fp16)
+        self._write_frame_inputs(pixels_u8, motion_fp16, depth_f32, normal_fp16, albedo_fp16)
         cmd_str = f"FRAME {self.c_bin} {self.d_bin} {self.m_bin} {self.o_bin} {self.n_bin} {self.a_bin} {self.eval_passes}\n"
         self.proc.stdin.write(cmd_str)
         self.proc.stdin.flush()
@@ -372,11 +452,17 @@ def amd_bridge_process_frames(
     daemon = AmdBridgeDaemon(bridge_exe, input_w, input_h, output_w, output_h, runtime, params)
     total = int(params.get("frame_count", 1))
     try:
-        for index, (pixels_u8, motion, reset) in enumerate(frames):
-            if index == 0:
-                out = daemon.start_and_process_first(pixels_u8, motion)
+        for index, item in enumerate(frames):
+            if len(item) == 3:
+                pixels_u8, motion, reset = item
+                d_frame, n_frame, a_frame = None, None, None
             else:
-                out = daemon.process_next_frame(pixels_u8, motion)
+                pixels_u8, motion, reset, d_frame, n_frame, a_frame = item
+
+            if index == 0:
+                out = daemon.start_and_process_first(pixels_u8, motion, d_frame, n_frame, a_frame)
+            else:
+                out = daemon.process_next_frame(pixels_u8, motion, d_frame, n_frame, a_frame)
 
             if params.get("detail", 1.0) != 1.0 or params.get("color", 1.0) != 1.0:
                 out = common.nr_composite(

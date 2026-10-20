@@ -169,7 +169,7 @@ def _build_params(kwargs: dict) -> dict:
         "colour_composition": colour_composition,
         "detail_strength": detail_strength,
         "colour_strength": colour_strength,
-        "warmup_frames": 1,
+        "warmup_frames": int(kwargs.get("warmup_passes", kwargs.get("Warmup passes", 8))),
         "keep_audio": kwargs.get("keep_audio", "on") == "on",
         "motion_mode": kwargs.get("motion", "auto"),
         "scene_change_threshold": float(kwargs.get("scene_change_threshold", 0.24)),
@@ -285,11 +285,49 @@ def _frame_source_iter(frame_iter, params: dict, holder=None):
         yield pixels_u8, motion, reset
 
 
-def _frame_source(images: torch.Tensor, params: dict):
-    """Yield (rgb_u8, motion_fp16, reset) for every input frame."""
-    return _frame_source_iter(
-        (sample_u8(images[index].detach().cpu().numpy()) for index in range(images.shape[0])),
-        params)
+def _frame_source(images: torch.Tensor, params: dict, depthmaps=None, normals=None, albedos=None):
+    """Yield (rgb_u8, motion_fp16, reset, depth_f32, normal_fp16, albedo_fp16) for every input frame."""
+    def gen():
+        temporal = params.get("batch_temporal", True)
+        flow_requested = params.get("motion_mode", "auto") in ("auto", "nvof", "optical_flow", "dis")
+        guides = None
+        zero_motion = None
+        seen_first = False
+        override_motion = params.get("override_motion")
+
+        for index in range(images.shape[0]):
+            pixels_u8 = sample_u8(images[index].detach().cpu().numpy())
+            if override_motion is not None:
+                motion = override_motion
+                reset = not seen_first
+            elif flow_requested and guides is None:
+                guides, engine_note = _select_motion_engine(pixels_u8, params)
+                params["motion_engine"] = engine_note
+                if guides is not None and guides.available:
+                    motion, guide_reset = guides.process(pixels_u8)
+                    reset = guide_reset or not temporal
+                else:
+                    if zero_motion is None:
+                        zero_motion = np.zeros((pixels_u8.shape[0], pixels_u8.shape[1], 2), dtype=np.float16)
+                    motion = zero_motion
+                    reset = (not temporal) or (not seen_first)
+            elif guides is not None and guides.available:
+                motion, guide_reset = guides.process(pixels_u8)
+                reset = guide_reset or not temporal
+            else:
+                if zero_motion is None:
+                    zero_motion = np.zeros((pixels_u8.shape[0], pixels_u8.shape[1], 2), dtype=np.float16)
+                motion = zero_motion
+                reset = (not temporal) or (not seen_first)
+            seen_first = True
+
+            d_f = depthmaps[min(index, len(depthmaps) - 1)].detach().cpu().numpy() if depthmaps is not None and len(depthmaps) > 0 else None
+            n_f = normals[min(index, len(normals) - 1)].detach().cpu().numpy() if normals is not None and len(normals) > 0 else None
+            a_f = albedos[min(index, len(albedos) - 1)].detach().cpu().numpy() if albedos is not None and len(albedos) > 0 else None
+
+            yield pixels_u8, motion, reset, d_f, n_f, a_f
+
+    return gen()
 
 
 def _make_progress_bar(total: int = 100):
@@ -776,7 +814,7 @@ class RH_DLSS5FrameInterpolation_AMD:
         return out_image, out_video, " | ".join(notes)
 
 
-def _run_frames(images: torch.Tensor, params: dict, backend_name: str):
+def _run_frames(images: torch.Tensor, params: dict, backend_name: str, depthmaps=None, normals=None, albedos=None):
     input_h, input_w = int(images.shape[1]), int(images.shape[2])
     output_w, output_h = common.target_size(input_w, input_h, params["scale"])
     params = dict(params)
@@ -786,7 +824,7 @@ def _run_frames(images: torch.Tensor, params: dict, backend_name: str):
         min(common.SCALE_TO_PERF_QUALITY, key=lambda c: abs(c - params["scale"]))
     ]
     backend = _load_backend(backend_name)
-    frames = _frame_source(images, params)
+    frames = _frame_source(images, params, depthmaps=depthmaps, normals=normals, albedos=albedos)
     # Preallocate once and fill per frame: accumulating a Python list and then
     # np.stack + .to() would hold several full-size copies of long videos.
     result = torch.empty((frame_count, output_h, output_w, 3), dtype=images.dtype, device=images.device)
@@ -851,7 +889,7 @@ def _run_frames_stream(reader, fps, params: dict, backend_name: str, source_vide
             selected_order, params.get("motion_engine", "none"))
 
 
-def _run_frames_zluda(images: torch.Tensor, params: dict):
+def _run_frames_zluda(images: torch.Tensor, params: dict, depthmaps=None, normals=None, albedos=None):
     """ZLUDA / ROCm pure PyTorch GPU-accelerated execution for image batches."""
     from .dlss5nr.amd_engine import ZludaTensorEnhancer
 
@@ -922,18 +960,372 @@ def _audio_source_path_of(video) -> Optional[str]:
     return None
 
 
+class RH_DLSS5ImageEnhance_AMD:
+    """DLSS 5 Neural Rendering enhance / upscale node for static IMAGES on AMD GPUs.
+
+    Accepts real depth maps, surface normals, albedos, and a 2-3 frame camera dolly
+    video (from Depthflow Preset Dolly) to compute real OpenCV DIS motion vectors.
+    Zero fake or dummy values.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Input image or image batch (RGB float32 0-1)."}),
+                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native resolution (DLAA); 1.5x/1.724x/2x/3x upscale; 1K/2K/4K/8K auto-fit short edge."}),
+                "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
+                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs."}),
+                "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "OptiScaler / AMD-NR v0.3.5.6 style presets."}),
+                "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass."}),
+                "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5, "tooltip": "NR working resolution percentage."}),
+                "neural_passes": ("INT", {"default": 1, "min": 0, "max": 3, "step": 1, "tooltip": "Number of neural refinement passes."}),
+                "warmup_passes": ("INT", {"default": 8, "min": 0, "max": 100, "step": 1, "tooltip": "Warmup passes before capturing output."}),
+                "full_network": ("BOOLEAN", {"default": True, "tooltip": "Run full 71-block neural network (lmxxf runtime)."}),
+                "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Fast execution mode for higher throughput."}),
+                "dynamic_nr_resolution": ("BOOLEAN", {"default": False, "tooltip": "Dynamic neural rendering resolution scaling."}),
+                "model_interleave": (["Off", "On"], {"default": "Off", "tooltip": "Interleave neural model evaluations."}),
+                "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Residual transfer strength (high-frequency detail)."}),
+                "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Residual clamp ratio."}),
+                "temporal_stability": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal stability to suppress flicker."}),
+                "sharpening": ("FLOAT", {"default": 0.00, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "FidelityFX CAS sharpening strength."}),
+                "colour_composition": (["Classic", "RenoDX (experimental)"], {"default": "Classic", "tooltip": "Colour composition mode."}),
+                "detail_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Local detail and micro-structure strength."}),
+                "colour_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Chroma strength and color fidelity."}),
+                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge", "tooltip": "Execution backend: amd_nr_bridge runs real DLSS-NR via D3D12/OptiScaler; zluda_tensor runs pure PyTorch GPU."}),
+            },
+            "optional": {
+                "depthmap": ("IMAGE", {"tooltip": "Real depth map (e.g. from Marigold V2 or DepthAnything). Normalized 0-1."}),
+                "surface_normal": ("IMAGE", {"tooltip": "Real surface normals (e.g. from Marigold V2 or DSINE). Normalized 0-1 or -1 to 1."}),
+                "albedo": ("IMAGE", {"tooltip": "Real albedo/reflectance map (e.g. from Marigold V2 or Intrinsic decomposition)."}),
+                "motion_video": ("IMAGE", {"tooltip": "2-3 frame camera dolly video of the image (generated via Depthflow Dolly) to compute real optical flow motion vectors using OpenCV DIS."}),
+                "runtime_dir": ("STRING", {"default": "", "tooltip": "Optional custom path to DLSS5/AMD-NR runtime folder."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "status")
+    FUNCTION = "enhance"
+    CATEGORY = "image/upscaling [AMD]"
+    DESCRIPTION = (
+        "DLSS 5 Neural Rendering enhance / upscale for static IMAGES on AMD GPUs. "
+        "Accepts real depth, surface normals, albedo, and an optional 2-3 frame camera dolly "
+        "video (from Depthflow Dolly) to generate real optical flow motion vectors via OpenCV DIS."
+    )
+
+    def enhance(self, image: torch.Tensor, **kwargs) -> tuple[torch.Tensor, str]:
+        if image is None:
+            raise DLSS5Error("The DLSS5 Image Enhance node requires an `image` input.")
+        enable_nr = kwargs.get("enable_nr", True)
+        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off"):
+            return image, "NR bypassed: image passed through unprocessed"
+
+        params = _build_params(kwargs)
+        is_zluda = params.get("is_zluda", False)
+        backend_name = "zluda-tensor" if is_zluda else _pick_backend(kwargs.get("backend", "auto"))
+
+        motion_video = kwargs.get("motion_video")
+        if motion_video is not None and len(motion_video) >= 2:
+            from .dlss5nr.amd_engine import compute_motion_from_video
+            w, h = int(image.shape[2]), int(image.shape[1])
+            flow = compute_motion_from_video(motion_video, w, h)
+            params["override_motion"] = flow
+            params["motion_engine"] = "depthflow_dis"
+
+        depthmap = kwargs.get("depthmap")
+        surface_normal = kwargs.get("surface_normal")
+        albedo = kwargs.get("albedo")
+
+        img_params, auto_note = _resolve_auto_scale(params, int(image.shape[2]), int(image.shape[1]))
+        if is_zluda:
+            result, iw, ih, ow, oh, order, engine = _run_frames_zluda(
+                image, img_params, depthmaps=depthmap, normals=surface_normal, albedos=albedo
+            )
+        else:
+            result, iw, ih, ow, oh, order, engine = _run_frames(
+                image, img_params, backend_name, depthmaps=depthmap, normals=surface_normal, albedos=albedo
+            )
+
+        note = f"IMAGE {int(image.shape[0])} frame(s) {iw}x{ih}->{ow}x{oh} via {backend_name} (channel {order}, motion {engine})"
+        if auto_note:
+            note += f"; {auto_note}"
+        return result, note
+
+
+class RH_DLSS5VideoEnhance_AMD:
+    """DLSS 5 Neural Rendering enhance / upscale node for VIDEOS on AMD GPUs.
+
+    Processes sequential frames with real OpenCV DIS frame-to-frame optical flow,
+    optional real video depthmaps (Video-Depth-Anything), surface normals (DSINE/derivative),
+    and albedo maps, with audio preservation.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Video frames batch [Batch, H, W, C]."}),
+                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Carrier upscaling resolution."}),
+                "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering."}),
+                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1"}),
+                "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look"}),
+                "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling"}),
+                "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5}),
+                "neural_passes": ("INT", {"default": 1, "min": 0, "max": 3, "step": 1}),
+                "warmup_passes": ("INT", {"default": 8, "min": 0, "max": 100, "step": 1}),
+                "full_network": ("BOOLEAN", {"default": True}),
+                "fast_mode": ("BOOLEAN", {"default": False}),
+                "dynamic_nr_resolution": ("BOOLEAN", {"default": False}),
+                "model_interleave": (["Off", "On"], {"default": "Off"}),
+                "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "temporal_stability": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "sharpening": ("FLOAT", {"default": 0.00, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "colour_composition": (["Classic", "RenoDX (experimental)"], {"default": "Classic"}),
+                "detail_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "colour_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "motion": (["auto", "dis", "none"], {"default": "auto", "tooltip": "Motion vectors: auto and dis compute dense frame-to-frame flow via OpenCV DIS internally."}),
+                "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Scene cut detection threshold."}),
+                "keep_audio": (["on", "off"], {"default": "on", "tooltip": "Preserve audio track in output video."}),
+                "backend": (["amd_nr_bridge", "zluda_tensor"], {"default": "amd_nr_bridge"}),
+            },
+            "optional": {
+                "video": ("VIDEO", {"tooltip": "Optional VIDEO object (from LoadVideo) for chunked streaming and native audio."}),
+                "depthmaps": ("IMAGE", {"tooltip": "Real depth maps for video frames (e.g. from Video-Depth-Anything). Normalized 0-1."}),
+                "surface_normals": ("IMAGE", {"tooltip": "Real surface normals for video frames (e.g. from DSINE or analytical depth derivative)."}),
+                "albedos": ("IMAGE", {"tooltip": "Real albedo maps for video frames (e.g. from bilateral/intrinsic decomposition)."}),
+                "audio": ("AUDIO", {"tooltip": "Optional external audio track to mux into output video."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.01, "tooltip": "Video frame rate."}),
+                "runtime_dir": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "VIDEO", "STRING")
+    RETURN_NAMES = ("images", "video", "status")
+    FUNCTION = "enhance"
+    CATEGORY = "video/upscaling [AMD]"
+    DESCRIPTION = (
+        "DLSS 5 Neural Rendering enhance / upscale for VIDEOS on AMD GPUs. "
+        "Calculates real frame-to-frame motion vectors using OpenCV DIS, and applies "
+        "real video depthmaps, surface normals, and albedo buffers."
+    )
+
+    def enhance(self, images: torch.Tensor, **kwargs) -> tuple[Optional[torch.Tensor], object, str]:
+        video = kwargs.get("video")
+        if images is None and video is None:
+            raise DLSS5Error("The DLSS5 Video Enhance node requires `images` or `video` input.")
+        enable_nr = kwargs.get("enable_nr", True)
+        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off"):
+            from .dlss5nr.videoout import build_video
+            fps = float(kwargs.get("fps", 24.0))
+            v_obj, _ = build_video(images, fps, kwargs.get("audio"), video)
+            return images, v_obj, "NR bypassed: video passed through unprocessed"
+
+        params = _build_params(kwargs)
+        is_zluda = params.get("is_zluda", False)
+        backend_name = "zluda-tensor" if is_zluda else _pick_backend(kwargs.get("backend", "auto"))
+
+        depthmaps = kwargs.get("depthmaps")
+        surface_normals = kwargs.get("surface_normals")
+        albedos = kwargs.get("albedos")
+
+        out_image = None
+        out_video = None
+        notes = []
+
+        src_path = _audio_source_path_of(video) if video is not None else None
+        reader = None
+        if src_path and depthmaps is None and surface_normals is None and albedos is None:
+            try:
+                reader = ChunkedVideoReader(src_path)
+            except Exception:
+                reader = None
+
+        if reader is not None:
+            from .dlss5nr.fg import as_fps
+            fps = as_fps(reader.fps if reader.fps > 0 else kwargs.get("fps", 24.0))
+            vid_params, auto_note = _resolve_auto_scale(params, int(reader.width), int(reader.height))
+            keep_audio = params["keep_audio"]
+            if is_zluda:
+                video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream_zluda(
+                    reader, fps, vid_params, source_video=video if keep_audio else None, audio_input=kwargs.get("audio")
+                )
+            else:
+                video_obj, iw, ih, ow, oh, order, engine = _run_frames_stream(
+                    reader, fps, vid_params, backend_name, source_video=video if keep_audio else None, audio_input=kwargs.get("audio")
+                )
+            out_video = video_obj
+            notes.append(f"VIDEO {reader.count} frames @{float(fps):g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} (chunked decode, motion {engine})")
+        else:
+            frames = images
+            if frames is None and video is not None:
+                components = video.get_components()
+                frames = components.images
+            if frames is None:
+                raise DLSS5Error("No frames available for video enhancement.")
+
+            fps = float(kwargs.get("fps", 24.0))
+            if video is not None:
+                components = video.get_components()
+                config = getattr(components, "config", None)
+                if config is not None and getattr(config, "fps", None):
+                    fps = float(config.fps)
+
+            vid_params, auto_note = _resolve_auto_scale(params, int(frames.shape[2]), int(frames.shape[1]))
+            if is_zluda:
+                result, iw, ih, ow, oh, order, engine = _run_frames_zluda(
+                    frames, vid_params, depthmaps=depthmaps, normals=surface_normals, albedos=albedos
+                )
+            else:
+                result, iw, ih, ow, oh, order, engine = _run_frames(
+                    frames, vid_params, backend_name, depthmaps=depthmaps, normals=surface_normals, albedos=albedos
+                )
+            out_image = result
+
+            from .dlss5nr.videoout import build_video
+            keep_audio = params["keep_audio"]
+            audio_source = kwargs.get("audio")
+            if audio_source is None and keep_audio and video is not None:
+                components = video.get_components()
+                audio_source = getattr(components, "audio", None)
+
+            video_obj, vnote = build_video(result, fps, audio_source, video if keep_audio else None)
+            out_video = video_obj
+            notes.append(f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via {backend_name} (channel {order}, motion {engine}); {vnote}")
+
+        return out_image, out_video, " | ".join(notes)
+
+
+class RH_DLSS5ImageFrameInterpolation_AMD:
+    """DLSS Frame Generation and optical flow interpolation for IMAGES on AMD GPUs.
+
+    Takes an image and an optional 2-3 frame camera dolly video (e.g. from Depthflow Dolly)
+    and interpolates in-between frames (2x, 3x, 4x, 6x, 8x) with OpenCV DIS bidirectional
+    optical flow and GPU warping.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Primary image or initial frame sequence."}),
+                "multiplier": (["2x", "3x", "4x", "6x", "8x"], {"default": "2x", "tooltip": "Frame interpolation multiplier."}),
+            },
+            "optional": {
+                "motion_video": ("IMAGE", {"tooltip": "2-3 frame camera dolly video of the image (generated via Depthflow Dolly) to interpolate into smooth motion."}),
+                "depthmap": ("IMAGE", {"tooltip": "Depth map for the frames."}),
+                "surface_normal": ("IMAGE", {"tooltip": "Surface normals for the frames."}),
+                "albedo": ("IMAGE", {"tooltip": "Albedo map for the frames."}),
+                "motion": (["dis", "auto"], {"default": "dis", "tooltip": "Motion engine (OpenCV DIS)."}),
+                "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "images_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.1}),
+                "runtime_dir": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "status")
+    FUNCTION = "interpolate"
+    CATEGORY = "image/motion [AMD]"
+    DESCRIPTION = (
+        "Interpolates intermediate camera frames from a static image and a 2-3 frame "
+        "Depthflow Dolly sequence using bidirectional OpenCV DIS optical flow and GPU warping."
+    )
+
+    def interpolate(self, image: torch.Tensor, **kwargs) -> tuple[torch.Tensor, str]:
+        from .dlss5nr.fg import as_fps, interpolate_frames
+        multiplier_str = str(kwargs.get("multiplier", "2x"))
+        multiplier_map = {"2x": 2, "3x": 3, "4x": 4, "6x": 6, "8x": 8}
+        mult = multiplier_map.get(multiplier_str, 2)
+        motion_video = kwargs.get("motion_video")
+        frames = motion_video if (motion_video is not None and len(motion_video) >= 2) else image
+        if frames is None:
+            raise DLSS5Error("Image Frame Interpolation requires `image` or `motion_video`.")
+        if len(frames) < 2:
+            return frames, "Only 1 frame provided; connect motion_video (2-3 Depthflow frames) to interpolate motion."
+
+        src_fps = as_fps(kwargs.get("images_fps", 24.0))
+        threshold = float(kwargs.get("scene_change_threshold", 0.24))
+        motion_mode = str(kwargs.get("motion", "dis"))
+        runtime_dir = str(kwargs.get("runtime_dir", "") or "")
+
+        bar = _make_progress_bar(100)
+        target_fps = src_fps * mult if mult not in (2, 3, 4) else None
+        result, out_fps, note = interpolate_frames(
+            frames, src_fps, mult if mult in (2, 3, 4) else 2, motion_mode, threshold, runtime_dir, "",
+            progress_callback=lambda done, total: bar.update_absolute(100 * done // max(1, total)),
+            target_fps=target_fps,
+        )
+        return result, f"IMAGE {len(frames)}->{len(result)} frames @{float(src_fps):g}->{float(out_fps):g}fps; {note}"
+
+
+class RH_DLSS5VideoFrameInterpolation_AMD:
+    """DLSS Frame Generation and OpenCV DIS temporal interpolation for VIDEOS on AMD GPUs.
+
+    Interpolates video frames to higher frame rates (2x, 3x, 4x, or target fps like 60/120/144)
+    with OpenCV DIS bidirectional optical flow, geometric guides, and audio stream preservation.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Video frames sequence [Batch, H, W, C]."}),
+                "output_fps": (["2x", "3x", "4x", "1x", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "72", "90", "96", "120", "144"], {"default": "2x", "tooltip": "Target frame rate multiplier or exact target FPS."}),
+            },
+            "optional": {
+                "video": ("VIDEO", {"tooltip": "Optional VIDEO object from LoadVideo for chunked decode and direct audio stream-copy."}),
+                "depthmaps": ("IMAGE", {"tooltip": "Real depth maps for video frames."}),
+                "surface_normals": ("IMAGE", {"tooltip": "Real surface normals for video frames."}),
+                "albedos": ("IMAGE", {"tooltip": "Real albedo maps for video frames."}),
+                "motion": (["auto", "dis", "nvof"], {"default": "auto", "tooltip": "Motion vectors guiding interpolation via OpenCV DIS."}),
+                "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "keep_audio": (["on", "off"], {"default": "on"}),
+                "audio": ("AUDIO", {"tooltip": "Optional replacement AUDIO track."}),
+                "images_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.1}),
+                "runtime_dir": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "VIDEO", "STRING")
+    RETURN_NAMES = ("images", "video", "status")
+    FUNCTION = "interpolate"
+    CATEGORY = "video [AMD]"
+    DESCRIPTION = (
+        "Raises video frame rate on AMD GPUs using high-speed OpenCV DIS bidirectional "
+        "optical flow with GPU pyramidal warping in PyTorch/ZLUDA. "
+        "Supports 2x/3x/4x multipliers or exact target frame rates (60/120/144 fps) with audio."
+    )
+
+    def interpolate(self, images: torch.Tensor, **kwargs) -> tuple[Optional[torch.Tensor], object, str]:
+        kwargs_copy = dict(kwargs)
+        kwargs_copy["image"] = images
+        interp = RH_DLSS5FrameInterpolation_AMD()
+        return interp.interpolate(**kwargs_copy)
+
+
 NODE_CLASS_MAPPINGS = {
+    # 4 distinct requested AMD nodes
+    "RH_DLSS5ImageEnhance_AMD": RH_DLSS5ImageEnhance_AMD,
+    "RH_DLSS5VideoEnhance_AMD": RH_DLSS5VideoEnhance_AMD,
+    "RH_DLSS5ImageFrameInterpolation_AMD": RH_DLSS5ImageFrameInterpolation_AMD,
+    "RH_DLSS5VideoFrameInterpolation_AMD": RH_DLSS5VideoFrameInterpolation_AMD,
+    # Backward compatibility and unified workflow mappings
     "RH_DLSS5Enhance_AMD": RH_DLSS5Enhance_AMD,
     "RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,
-    # Backward compatibility aliases for previous Dlss5-AMD workflows
-    "Dlss5AmdFsrSimple": RH_DLSS5Enhance_AMD,
-    "Dlss5AmdNvidiaSimple": RH_DLSS5Enhance_AMD,
-    "Dlss5AmdIntelSimple": RH_DLSS5Enhance_AMD,
-    "Dlss5AmdImageEnhancer": RH_DLSS5Enhance_AMD,
+    "Dlss5AmdFsrSimple": RH_DLSS5ImageEnhance_AMD,
+    "Dlss5AmdNvidiaSimple": RH_DLSS5ImageEnhance_AMD,
+    "Dlss5AmdIntelSimple": RH_DLSS5ImageEnhance_AMD,
+    "Dlss5AmdImageEnhancer": RH_DLSS5ImageEnhance_AMD,
 }
+
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RH_DLSS5Enhance_AMD": "RH DLSS5 Enhance (NR / Upscale) [AMD]",
-    "RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD]",
+    "RH_DLSS5ImageEnhance_AMD": "DLSS5 Image Enhance (NR / Upscale) [AMD]",
+    "RH_DLSS5VideoEnhance_AMD": "DLSS5 Video Enhance (NR / Upscale) [AMD]",
+    "RH_DLSS5ImageFrameInterpolation_AMD": "DLSS5 Image Frame Interpolation [AMD]",
+    "RH_DLSS5VideoFrameInterpolation_AMD": "DLSS5 Video Frame Interpolation [AMD]",
+    "RH_DLSS5Enhance_AMD": "RH DLSS5 Enhance (NR / Upscale) [AMD] (Unified)",
+    "RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD] (Unified)",
     "Dlss5AmdFsrSimple": "Dlss5 AMD FSR Simple (Legacy) [AMD]",
     "Dlss5AmdNvidiaSimple": "Dlss5 AMD Nvidia Simple (Legacy) [AMD]",
     "Dlss5AmdIntelSimple": "Dlss5 AMD Intel Simple (Legacy) [AMD]",
