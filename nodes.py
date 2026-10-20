@@ -34,7 +34,7 @@ _SCALE_KEY = {"1x": 1.0, "1.5x": 1.5, "1.724x": 1.724, "2x": 2.0, "3x": 3.0}
 
 
 def _load_backend(name: str):
-    if name == "windows-bridge":
+    if name in ("windows-bridge", "amd_nr_bridge", "amd-bridge", "auto"):
         from .dlss5nr import windows_backend
 
         if not windows_backend.supported():
@@ -50,7 +50,7 @@ def _load_backend(name: str):
 
 
 def _pick_backend(backend: str) -> str:
-    if backend == "auto":
+    if backend in ("auto", "amd_nr_bridge", "amd-bridge"):
         return "windows-bridge" if platform.system() == "Windows" else "linux-wine"
     return backend
 

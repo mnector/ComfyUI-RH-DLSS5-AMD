@@ -12,6 +12,8 @@
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 // --- NGX Function Pointer Types ---
 typedef NVSDK_NGX_Result(__cdecl* PFN_NVSDK_NGX_D3D12_Init_with_ProjectID)(const char*, NVSDK_NGX_EngineType, const char*, const wchar_t*, ID3D12Device*, const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version);
@@ -334,13 +336,76 @@ int main(int argc, char** argv) {
     g_pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_pFence));
     g_FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-    // SwapChain (offscreen hidden window, required for DXGI Present hook)
-    WNDCLASSA wc = {}; wc.lpfnWndProc = DefWindowProc; wc.hInstance = GetModuleHandle(nullptr); wc.lpszClassName = "ED2Bridge";
+    // --- Monitor Enumeration for Kanvas 20 (Secondary Monitor) ---
+    struct MonitorTarget {
+        int x = 0;
+        int y = 0;
+        int width = 1536;
+        int height = 864;
+        bool foundSecondary = false;
+        char deviceName[32] = {};
+    };
+
+    auto EnumMonProc = [](HMONITOR hMon, HDC, LPRECT, LPARAM lp) -> BOOL {
+        auto* target = reinterpret_cast<MonitorTarget*>(lp);
+        MONITORINFOEXA mi = {};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoA(hMon, &mi)) {
+            if (!(mi.dwFlags & MONITORINFOF_PRIMARY)) {
+                target->x = mi.rcMonitor.left;
+                target->y = mi.rcMonitor.top;
+                target->width = mi.rcMonitor.right - mi.rcMonitor.left;
+                target->height = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                target->foundSecondary = true;
+                strncpy_s(target->deviceName, mi.szDevice, sizeof(target->deviceName) - 1);
+                return FALSE; // Found secondary display (Kanvas 20)
+            } else if (!target->foundSecondary) {
+                target->x = mi.rcMonitor.left;
+                target->y = mi.rcMonitor.top;
+                target->width = mi.rcMonitor.right - mi.rcMonitor.left;
+                target->height = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                strncpy_s(target->deviceName, mi.szDevice, sizeof(target->deviceName) - 1);
+            }
+        }
+        return TRUE;
+    };
+
+    MonitorTarget monTarget;
+    EnumDisplayMonitors(nullptr, nullptr, EnumMonProc, reinterpret_cast<LPARAM>(&monTarget));
+    LOG("Target display for bridge window: " << (monTarget.foundSecondary ? "Secondary Monitor (Kanvas 20)" : "Primary Display")
+        << " [" << monTarget.deviceName << "] at (" << monTarget.x << ", " << monTarget.y
+        << ") size " << monTarget.width << "x" << monTarget.height);
+
+    int winW = (int)out_w;
+    int winH = (int)out_h;
+    if (monTarget.width > 0 && winW > monTarget.width) winW = monTarget.width;
+    if (monTarget.height > 0 && winH > monTarget.height) winH = monTarget.height;
+    int winX = monTarget.x;
+    int winY = monTarget.y;
+
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = "ED2Bridge";
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClassA(&wc);
-    // Offscreen hidden tool window: never shown to user, zero black screen flashes
-    HWND hWnd = CreateWindowExA(WS_EX_TOOLWINDOW, "ED2Bridge", "ED2", WS_POPUP, -32000, -32000, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
+
+    // Create a REAL visible foreground window on Kanvas 20 (secondary screen)
+    // so OptiScaler / AMD-NR has an active foreground swapchain and does not stall/freeze.
+    HWND hWnd = CreateWindowExA(
+        WS_EX_APPWINDOW,
+        "ED2Bridge",
+        "DLSS5-AMD Neural Rendering Bridge (Kanvas 20)",
+        WS_POPUP | WS_VISIBLE,
+        winX, winY, winW, winH,
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
+    ShowWindow(hWnd, SW_SHOW);
+    UpdateWindow(hWnd);
+    SetForegroundWindow(hWnd);
+
     DXGI_SWAP_CHAIN_DESC1 scd = {};
-    scd.Width = out_w; scd.Height = out_h; scd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scd.Width = winW; scd.Height = winH; scd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     scd.SampleDesc.Count = 1; scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.BufferCount = 2; scd.Scaling = DXGI_SCALING_STRETCH;
     scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -375,9 +440,18 @@ int main(int argc, char** argv) {
     UploadTexture(pExposure, 1, 1, DXGI_FORMAT_R32_FLOAT, 4, &expVal);
 
     // --- Init NGX ---
-    LOG("Loading OptiScaler (OptiScaler.dll)...");
-    HMODULE hNvngx = LoadLibraryA("OptiScaler.dll");
-    if (!hNvngx) { LOG("Cannot load OptiScaler.dll"); return 1; }
+    LOG("Loading OptiScaler...");
+    HMODULE hNvngx = GetModuleHandleA("dxgi.dll");
+    if (!hNvngx || !GetProcAddress(hNvngx, "NVSDK_NGX_D3D12_Init_with_ProjectID")) {
+        hNvngx = GetModuleHandleA("OptiScaler.dll");
+    }
+    if (!hNvngx || !GetProcAddress(hNvngx, "NVSDK_NGX_D3D12_Init_with_ProjectID")) {
+        hNvngx = LoadLibraryA("OptiScaler.dll");
+    }
+    if (!hNvngx || !GetProcAddress(hNvngx, "NVSDK_NGX_D3D12_Init_with_ProjectID")) {
+        hNvngx = LoadLibraryA("dxgi.dll");
+    }
+    if (!hNvngx) { LOG("Cannot load OptiScaler.dll or dxgi.dll"); return 1; }
     PatchOptiScaler(hNvngx, "OptiScaler.dll");
 
     auto pfnInit = (PFN_NVSDK_NGX_D3D12_Init_with_ProjectID)GetProcAddress(hNvngx, "NVSDK_NGX_D3D12_Init_with_ProjectID");
@@ -541,6 +615,10 @@ int main(int argc, char** argv) {
 
     // Cleanup
     g_WatchdogRunning = false;
+    if (hWnd) {
+        DestroyWindow(hWnd);
+        hWnd = nullptr;
+    }
     LOG("Bridge daemon shutting down.");
     return 0;
 }
