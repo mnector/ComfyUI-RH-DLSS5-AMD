@@ -117,11 +117,11 @@ int PatchOptiScaler(HMODULE hMod, const char* name) {
     if (!hMod) return 0;
     LOG("Patching OptiScaler (" << name << ")...");
     int count = 0;
-    if (PatchMemory(hMod, 0x14585, {0x73, 0x6A}, {0xEB, 0x6A})) count++;
-    if (PatchMemory(hMod, 0x14587, {0x48, 0x83, 0x81}, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90})) count++;
-    if (PatchMemory(hMod, 0x19442, {0x0F, 0x84}, {0xE9, 0xD3, 0x00, 0x00, 0x00, 0x90})) count++;
-    if (PatchMemory(hMod, 0x14750, {0x0F, 0x84}, {0xE9, 0xD0, 0x00, 0x00, 0x00, 0x90})) count++;
-    LOG("  OptiScaler: " << count << "/4 patches applied.");
+    // Disable DlssNr ExposureScan Adopt (RVA 0x3F2980): prevents scanning & adopting random buffers as exposure
+    if (PatchMemory(hMod, 0x3F2980, {0x40, 0x55, 0x53, 0x56}, {0xC3, 0x90, 0x90, 0x90})) count++;
+    // Disable DlssNr ExposureScan Tick (RVA 0x3F2BA0): prevents tracking candidate resources
+    if (PatchMemory(hMod, 0x3F2BA0, {0x48, 0x89, 0x5C, 0x24}, {0xC3, 0x90, 0x90, 0x90})) count++;
+    LOG("  OptiScaler: " << count << "/2 exposure-scan patches applied.");
     return count;
 }
 
@@ -237,6 +237,37 @@ std::vector<uint8_t> ReadFileBin(const std::string& path) {
     return data;
 }
 
+// Camera matrices for Ray Reconstruction (Feature 13 DLSS-D / FSR-RR)
+static float g_WorldToView[16] = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 1.0f
+};
+
+static float g_ViewToClip[16] = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 1.0f
+};
+
+void InitCameraMatrices(UINT w, UINT h) {
+    float fov = 1.04719755f; // 60 deg
+    float aspect = (float)w / (float)h;
+    float nearZ = 0.1f;
+    float farZ = 1000.0f;
+    float tanHalfFov = tanf(fov / 2.0f);
+
+    memset(g_ViewToClip, 0, sizeof(g_ViewToClip));
+    g_ViewToClip[0] = 1.0f / (aspect * tanHalfFov);
+    g_ViewToClip[5] = 1.0f / tanHalfFov;
+    g_ViewToClip[10] = farZ / (farZ - nearZ);
+    g_ViewToClip[11] = 1.0f;
+    g_ViewToClip[14] = -(farZ * nearZ) / (farZ - nearZ);
+    g_ViewToClip[15] = 0.0f;
+}
+
 // =====================================================================
 // Run one evaluation pass (one "frame" of the simulated game loop)
 // =====================================================================
@@ -324,6 +355,18 @@ void RunOneEvalPass(
     pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
     pParams->Set("PreExposure", 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
+
+    // Camera Matrices for FSR-RR (Ray Reconstruction Feature 13)
+    pParams->Set("WorldToViewMatrix", (void*)g_WorldToView);
+    pParams->Set("ViewToClipMatrix", (void*)g_ViewToClip);
+    pParams->Set("DLSS.Camera.WorldToViewMatrix", (void*)g_WorldToView);
+    pParams->Set("DLSS.Camera.ViewToClipMatrix", (void*)g_ViewToClip);
+    pParams->Set("FSR.cameraNear", 0.1f);
+    pParams->Set("FSR.cameraFar", 1000.0f);
+    pParams->Set("FSR.cameraFovAngleVertical", 1.04719755f);
+    pParams->Set("CameraNear", 0.1f);
+    pParams->Set("CameraFar", 1000.0f);
+    pParams->Set("CameraFOV", 60.0f);
 
     TransitionResource(g_pCommandList, pOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -419,6 +462,11 @@ int main(int argc, char** argv) {
     int warmup_passes = std::stoi(argv[14]);
     int settle_pause_ms = (argc > 15) ? std::stoi(argv[15]) : 350;
     int warmup_interval_ms = (argc > 16) ? std::stoi(argv[16]) : 50;
+    int feature_id = (argc > 17) ? std::stoi(argv[17]) : 1;
+    const char* envFeature = getenv("DLSS_FEATURE_ID");
+    if (envFeature && envFeature[0] != '\0') {
+        try { feature_id = std::stoi(envFeature); } catch (...) {}
+    }
 
     std::string colorPath = argv[5], depthPath = argv[6], mvecPath = argv[7];
     std::string outputPath = argv[8], normalPath = argv[10], albedoPath = argv[11];
@@ -620,20 +668,68 @@ int main(int argc, char** argv) {
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, h);
     pParams->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
     pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
-    pParams->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, (1 << 0) | (1 << 3) | (1 << 6)); // kMVLowRes | kDepthInverted | kAutoExposure
+    pParams->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, (1 << 3)); // kDepthInverted
+    pParams->Set("DepthInverted", 1);
+    pParams->Set("DLSS.Use.HW.Depth", 1);
+    pParams->Set("FfxDenoiserHardwareDepth", 1);
+    pParams->Set("FfxDenoiserNormalsInViewSpace", 1);
+    pParams->Set("FfxDenoiserAlbedoFp16", 1);
+    pParams->Set("DLSS.Roughness.Mode", 0);
+    pParams->Set("DLSS.Denoise.Mode", 0);
 
-    // CreateFeature
+    // Initial binding of textures to params prior to CreateFeature
+    pParams->Set(NVSDK_NGX_Parameter_Color, pColor);
+    pParams->Set("DLSSNR.Color", pColor);
+    pParams->Set("DLSSD.Color", pColor);
+    pParams->Set(NVSDK_NGX_Parameter_Output, pOutput);
+    pParams->Set("DLSSNR.Output", pOutput);
+    pParams->Set("DLSSD.Output", pOutput);
+    pParams->Set(NVSDK_NGX_Parameter_Depth, pDepth);
+    pParams->Set("DLSSNR.Depth", pDepth);
+    pParams->Set("DLSSD.Depth", pDepth);
+    pParams->Set(NVSDK_NGX_Parameter_MotionVectors, pMvec);
+    pParams->Set("DLSSNR.MVec", pMvec);
+    pParams->Set("DLSSD.MotionVectors", pMvec);
+    pParams->Set("Roughness", pNormal);
+    pParams->Set("GBuffer.Normals", pNormal);
+    pParams->Set("GBuffer.Roughness", pNormal);
+    pParams->Set("Albedo", pAlbedo);
+    pParams->Set("GBuffer.Albedo", pAlbedo);
+    pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
+
+    // Initialize & bind Camera Matrices for FSR-RR (Feature 13)
+    InitCameraMatrices(w, h);
+    pParams->Set("WorldToViewMatrix", (void*)g_WorldToView);
+    pParams->Set("ViewToClipMatrix", (void*)g_ViewToClip);
+    pParams->Set("DLSS.Camera.WorldToViewMatrix", (void*)g_WorldToView);
+    pParams->Set("DLSS.Camera.ViewToClipMatrix", (void*)g_ViewToClip);
+    pParams->Set("FSR.cameraNear", 0.1f);
+    pParams->Set("FSR.cameraFar", 1000.0f);
+    pParams->Set("FSR.cameraFovAngleVertical", 1.04719755f);
+    pParams->Set("CameraNear", 0.1f);
+    pParams->Set("CameraFar", 1000.0f);
+    pParams->Set("CameraFOV", 60.0f);
+
+    // CreateFeature: select between Feature 1 (SuperSampling) and Feature 13 (Ray Reconstruction / DLSS-D / FSR-RR)
+    NVSDK_NGX_Feature targetFeature = (feature_id == 13) ? NVSDK_NGX_Feature_RayReconstruction : NVSDK_NGX_Feature_SuperSampling;
+    LOG("Creating NGX Feature: " << (int)targetFeature 
+        << (targetFeature == NVSDK_NGX_Feature_RayReconstruction ? " (Ray Reconstruction / DLSS-D / FSR-RR Feature 13)" : " (SuperSampling / DLSS-SR / FSR-SR Feature 1)"));
+
     g_pCommandAllocator->Reset(); g_pCommandList->Reset(g_pCommandAllocator, nullptr);
     ID3D12CommandAllocator* pCA2 = nullptr; ID3D12GraphicsCommandList* pCL2 = nullptr;
     g_pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&pCA2));
     g_pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, pCA2, nullptr, IID_PPV_ARGS(&pCL2));
     NVSDK_NGX_Handle* pHandle = nullptr;
-    res = pfnCreateFeature(pCL2, NVSDK_NGX_Feature_SuperSampling, pParams, &pHandle);
+    res = pfnCreateFeature(pCL2, targetFeature, pParams, &pHandle);
+    if (NVSDK_NGX_FAILED(res) && targetFeature == NVSDK_NGX_Feature_RayReconstruction) {
+        LOG("Ray Reconstruction CreateFeature returned 0x" << std::hex << res << ". Falling back to SuperSampling (Feature 1)..." << std::dec);
+        res = pfnCreateFeature(pCL2, NVSDK_NGX_Feature_SuperSampling, pParams, &pHandle);
+    }
     pCL2->Close();
     ID3D12CommandList* cl2[] = { pCL2 }; g_pCommandQueue->ExecuteCommandLists(1, cl2); WaitForGPU();
     pCL2->Release(); pCA2->Release();
     if (NVSDK_NGX_FAILED(res)) { LOG("CreateFeature failed: 0x" << std::hex << res); return 1; }
-    LOG("NGX Feature created.");
+    LOG("NGX Feature created successfully.");
 
     // Set persistent params
     // Color

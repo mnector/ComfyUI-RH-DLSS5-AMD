@@ -22,6 +22,7 @@ _UPSCALE_METHODS = [
     "FSR (AMD FidelityFX)",
     "XeSS (Intel XeSS)",
     "DLSS (NVIDIA DLSS)",
+    "Ray Reconstruction (DLSS-D / FSR-RR)",
 ]
 
 _UPSCALE_MODES = [
@@ -96,15 +97,22 @@ def _build_params(kwargs: dict) -> dict:
 
     raw_method = str(kwargs.get("upscale_method", "FSR")).strip()
     raw_lower = raw_method.lower()
-    if "xess" in raw_lower or "intel" in raw_lower:
+    if "ray" in raw_lower or "reconstruction" in raw_lower or "dlssd" in raw_lower or "rr" in raw_lower:
+        dx12_upscaler = "rr"
+        method_label = "Ray Reconstruction (DLSS-D / FSR-RR)"
+        is_ray_reconstruction = True
+    elif "xess" in raw_lower or "intel" in raw_lower:
         dx12_upscaler = "xess"
         method_label = "XeSS (Intel XeSS)"
+        is_ray_reconstruction = False
     elif "dlss" in raw_lower or "nvidia" in raw_lower:
         dx12_upscaler = "dlss"
         method_label = "DLSS (NVIDIA DLSS)"
+        is_ray_reconstruction = False
     else:
         dx12_upscaler = "ffx"
         method_label = "FSR (AMD FidelityFX)"
+        is_ray_reconstruction = False
 
     runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=is_zluda)
 
@@ -148,19 +156,19 @@ def _build_params(kwargs: dict) -> dict:
 
     nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Full Model Look"
     presets = {
-        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
         "NVIDIA look":     {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": True},
         "AMDNR soft":      {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": False},
         "Cinematic":       {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
         "Crisp":           {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
         "Natural":         {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
         "Vivid":           {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Default":         {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 2.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "Default":         {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
     }
     preset_vals = presets.get(nr_style, {})
 
     enable_nr = bool(kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True)))
-    neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "danielblnc 0.5.1")))
+    neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "lmxxf")))
     neural_placement = str(kwargs.get("neural_placement", preset_vals.get("neural_placement", kwargs.get("Neural placement", "After upscaling"))))
     nr_resolution = int(kwargs.get("nr_resolution", kwargs.get("NR resolution (%)", 100)))
     neural_passes = int(kwargs.get("neural_passes", kwargs.get("Neural passes", 1)))
@@ -188,6 +196,7 @@ def _build_params(kwargs: dict) -> dict:
         "backend": backend,
         "amd_backend": backend,
         "dx12_upscaler": dx12_upscaler,
+        "is_ray_reconstruction": is_ray_reconstruction,
         "upscale_method": method_label,
         "upscale_method_label": method_label,
         "gpu_index": gpu_index,
@@ -415,8 +424,8 @@ class RH_DLSS5Enhance_AMD:
 
                 # AMD-NR Core
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
-                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD (danielblnc native HIP kernels or lmxxf runtime)."}),
-                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), or DLSS (NVIDIA DLSS via translation)."}),
+                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), DLSS (NVIDIA DLSS), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR natively consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "AMD-NR v0.3.5.6 style presets: Full Model Look (default in 0.3.5.6: After upscaling + Full network + Structure 2.00 + Temporal stability 0.50), NVIDIA look (Before upscaling + Full network), AMDNR soft (Before upscaling + Full network off), Cinematic, Crisp, Natural, Vivid, or Custom."}),
 
@@ -1023,10 +1032,10 @@ class RH_DLSS5ImageEnhance_AMD:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Input image or image batch (RGB float32 0-1)."}),
-                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4 via amd_fidelityfx_upscaler_dx12.dll), XeSS (Intel XeSS 1.3 via libxess.dll with DP4a), or DLSS (NVIDIA DLSS via nvngx_dlss.dll / DLSS Enabler)."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX via amd_fidelityfx_upscaler_dx12.dll), XeSS (Intel XeSS via libxess.dll), DLSS (NVIDIA DLSS via nvngx_dlss.dll), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR via amd_fidelityfx_denoiser_dx12.dll consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
-                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs."}),
+                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "OptiScaler / AMD-NR v0.3.5.6 style presets."}),
                 "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass."}),
                 "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5, "tooltip": "NR working resolution percentage."}),
@@ -1123,10 +1132,10 @@ class RH_DLSS5VideoEnhance_AMD:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "Video frames batch [Batch, H, W, C]."}),
-                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4), XeSS (Intel XeSS 1.3), or DLSS (NVIDIA DLSS via translation)."}),
+                "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), DLSS (NVIDIA DLSS), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR via amd_fidelityfx_denoiser_dx12.dll consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering."}),
-                "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1"}),
+                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look"}),
                 "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling"}),
                 "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5}),

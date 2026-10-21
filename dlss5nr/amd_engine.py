@@ -123,8 +123,12 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdNeuralLightingStrength", "1")
             config.set("DlssNr", "AmdSkipUnwrittenFrames", "false")
             config.set("DlssNr", "AmdHoldResize", "false")
-            config.set("DlssNr", "AmdUseGameExposure", "0")
+            config.set("DlssNr", "AmdUseGameExposure", "1")
+            config.set("DlssNr", "UseGameExposure", "1")
             config.set("DlssNr", "ScanExposure", "false")
+            config.set("DlssNr", "ScanMeter", "false")
+            config.set("DlssNr", "ScanAnchors", "false")
+            config.set("DlssNr", "AmdLmxxfAutoExposure", "false")
             if config.has_option("DlssNr", "Scale"):
                 config.remove_option("DlssNr", "Scale")
             if config.has_option("DlssNr", "Residual"):
@@ -134,7 +138,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "Temporal", "1")
             config.set("DlssNr", "DepthInverted", "1")
             config.set("DlssNr", "UseAutoMask", "1")
-            config.set("DlssNr", "FreshExposure", "1")
+            config.set("DlssNr", "FreshExposure", "0")
             config.set("DlssNr", "WorkingScale", f"{working_scale:.2f}")
             config.set("DlssNr", "Passes", str(passes))
             config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
@@ -164,28 +168,46 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNrOnAmd", "DepthInverted", "1")
             config.set("DlssNrOnAmd", "PreHistory", "1")
             config.set("DlssNrOnAmd", "UseAutoMask", "1")
-            config.set("DlssNrOnAmd", "UseGameExposure", "0")
+            config.set("DlssNrOnAmd", "UseGameExposure", "1")
             config.set("DlssNrOnAmd", "Quality", "0" if not fast_m else "1")
             config.set("DlssNrOnAmd", "SpinDraw", "1")
 
-            # [AmdLook]
+            # [AmdLook] - Non-neural post-process filter disabled to avoid compounding contrast/saturation
             if not config.has_section("AmdLook"):
                 config.add_section("AmdLook")
-            config.set("AmdLook", "Enabled", "true")
-            config.set("AmdLook", "Appearance", "2")
-            config.set("AmdLook", "Mix", "1.0")
+            config.set("AmdLook", "Enabled", "false")
+            config.set("AmdLook", "Appearance", "0")
+            config.set("AmdLook", "Mix", "0.0")
 
             # [Upscalers]
             if not config.has_section("Upscalers"):
                 config.add_section("Upscalers")
+            is_ray_reconstruction = bool(params.get("is_ray_reconstruction", False))
             dx12_carrier = str(params.get("dx12_upscaler", params.get("upscale_method", "ffx"))).lower()
-            if "xess" in dx12_carrier or "intel" in dx12_carrier:
+            if is_ray_reconstruction or "ray" in dx12_carrier or "reconstruction" in dx12_carrier or "rr" in dx12_carrier:
+                target_carrier = "ffx"
+                config.set("Upscalers", "FfxDx12RRPath", "auto")
+            elif "xess" in dx12_carrier or "intel" in dx12_carrier:
                 target_carrier = "xess"
             elif "dlss" in dx12_carrier or "nvidia" in dx12_carrier:
                 target_carrier = "dlss"
             else:
                 target_carrier = "ffx"
             config.set("Upscalers", "Dx12Upscaler", target_carrier)
+
+            # [FSR-RR] - AMD FidelityFX Ray Regeneration (Feature 13 DLSS-D translation)
+            if not config.has_section("FSR-RR"):
+                config.add_section("FSR-RR")
+            config.set("FSR-RR", "FfxDenoiserUseAmdDefaults", "true")
+            config.set("FSR-RR", "FfxDenoiserAllowPreRdna4", "true")
+            config.set("FSR-RR", "RrBackend", "auto")
+            config.set("FSR-RR", "FfxDenoiserSkinSmoothing", "false")
+            config.set("FSR-RR", "FfxDenoiserAlbedoFp16", "true")
+
+            # [DLSSD]
+            if not config.has_section("DLSSD"):
+                config.add_section("DLSSD")
+            config.set("DLSSD", "RenderPresetOverride", "auto")
 
             # [Spoofing] - CRITICAL: Never spoof Dxgi or Nvidia vendor on AMD GPUs,
             # otherwise OptiScaler IsAmd check fails and skips all AMD HIP passes!
@@ -311,6 +333,11 @@ class AmdBridgeDaemon:
         self.o_bin = self.tmp_path / "o.bin"
         self.proc: Optional[subprocess.Popen] = None
         self.warmup_passes = max(0, int(params.get("warmup_passes", params.get("warmup_frames", 8))))
+        runtime_name = str(params.get("neural_runtime", "lmxxf")).lower()
+        if "daniel" in runtime_name and self.warmup_passes > 6:
+            print(f"[RH-DLSS5-AMD] Clamping danielblnc warmup passes from {self.warmup_passes} to 6 "
+                  f"(danielblnc closed runtime has a 6-frame buffer limit; use neural_runtime='lmxxf' for unlimited warmup passes).", flush=True)
+            self.warmup_passes = 6
         self.settle_pause_ms = max(0, int(params.get("settle_pause_ms", 350)))
         self.warmup_interval_ms = max(0, int(params.get("warmup_interval_ms", 50)))
         self.eval_passes = max(1, int(params.get("neural_passes", 1)))
@@ -400,6 +427,7 @@ class AmdBridgeDaemon:
         albedo_fp16: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         self._write_frame_inputs(pixels_u8, motion_fp16, depth_f32, normal_fp16, albedo_fp16)
+        feature_id = 13 if bool(self.params.get("is_ray_reconstruction", False)) else 1
         cmd = [
             str(self.bridge_exe),
             str(self.input_w), str(self.input_h),
@@ -408,9 +436,13 @@ class AmdBridgeDaemon:
             str(self.eval_passes), str(self.n_bin), str(self.a_bin),
             str(self.fps), str(self.frametime), str(self.warmup_passes),
             str(self.settle_pause_ms), str(self.warmup_interval_ms),
+            str(feature_id),
         ]
+        feat_name = "Ray Reconstruction (DLSS-D / FSR-RR Feature 13)" if feature_id == 13 else "SuperSampling (DLSS-SR / FSR Feature 1)"
         print(f"[RH-DLSS5-AMD] Starting persistent AMD-NR D3D12 bridge: {self.bridge_exe.name} "
-              f"({self.input_w}x{self.input_h} -> {self.output_w}x{self.output_h})", flush=True)
+              f"[{feat_name}] ({self.input_w}x{self.input_h} -> {self.output_w}x{self.output_h})", flush=True)
+        bridge_env = dict(os.environ)
+        bridge_env["DLSS_FEATURE_ID"] = str(feature_id)
         self.proc = subprocess.Popen(
             cmd,
             cwd=str(self.runtime_dir),
@@ -418,6 +450,7 @@ class AmdBridgeDaemon:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=bridge_env,
         )
         # Wait for READY
         while True:
