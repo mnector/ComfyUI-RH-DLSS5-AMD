@@ -98,7 +98,15 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     full_net = bool(params.get("full_network", preset_dict.get("full_network", True)))
     fast_m = bool(params.get("fast_mode", False))
     dynamic_res = bool(params.get("dynamic_nr_resolution", False))
-    interleave = "2" if str(params.get("model_interleave", "Off")).lower() == "on" else "0"
+    raw_interleave = str(params.get("model_interleave", "Off")).strip()
+    if "4" in raw_interleave:
+        interleave = "4"
+    elif "3" in raw_interleave:
+        interleave = "3"
+    elif "2" in raw_interleave or raw_interleave.lower() == "on":
+        interleave = "2"
+    else:
+        interleave = "0"
     composition = "1" if "reno" in str(params.get("colour_composition", "Classic")).lower() else "0"
     nr_backend = "daniel" if "daniel" in str(params.get("neural_runtime", "daniel")).lower() else "lmxxf"
 
@@ -161,6 +169,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             if not config.has_section("DlssNrOnAmd"):
                 config.add_section("DlssNrOnAmd")
             config.set("DlssNrOnAmd", "Enabled", "1" if enable_nr else "0")
+            config.set("DlssNrOnAmd", "Interleave", interleave)
             config.set("DlssNrOnAmd", "Residual", "1")
             config.set("DlssNrOnAmd", "Temporal", "1")
             config.set("DlssNrOnAmd", "UseDepth", "1")
@@ -203,6 +212,13 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("FSR-RR", "RrBackend", "auto")
             config.set("FSR-RR", "FfxDenoiserSkinSmoothing", "false")
             config.set("FSR-RR", "FfxDenoiserAlbedoFp16", "true")
+            config.set("FSR-RR", "OverrideSharpness", "true")
+            config.set("FSR-RR", "RrDefaultSharpness", "0.40")
+            config.set("FSR-RR", "FfxDenoiserFloorNormalSharpness", "1.00")
+            config.set("FSR-RR", "FfxDenoiserFloorGrazingSharpness", "1.00")
+            config.set("FSR-RR", "FfxDenoiserFloorDetailBoost", "1.00")
+            config.set("FSR-RR", "FfxDenoiserFloorHandoverDetail", "1.00")
+            config.set("FSR-RR", "FfxDenoiserDisocThreshold", "0.05")
 
             # [DLSSD]
             if not config.has_section("DLSSD"):

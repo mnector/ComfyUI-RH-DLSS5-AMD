@@ -25,6 +25,18 @@ _UPSCALE_METHODS = [
     "Ray Reconstruction (DLSS-D / FSR-RR)",
 ]
 
+_NEURAL_RUNTIMES = [
+    "danielblnc 0.5.1",
+    "lmxxf",
+]
+
+_MODEL_INTERLEAVE_OPTIONS = [
+    "Off (Every frame)",
+    "2x (Every 2nd frame)",
+    "3x (Every 3rd frame)",
+    "4x (Every 4th frame)",
+]
+
 _UPSCALE_MODES = [
     "1x (DLAA / native)",
     "1.5x (Quality)",
@@ -168,14 +180,14 @@ def _build_params(kwargs: dict) -> dict:
     preset_vals = presets.get(nr_style, {})
 
     enable_nr = bool(kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True)))
-    neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "lmxxf")))
+    neural_runtime = str(kwargs.get("neural_runtime", kwargs.get("Neural runtime", "danielblnc 0.5.1")))
     neural_placement = str(kwargs.get("neural_placement", preset_vals.get("neural_placement", kwargs.get("Neural placement", "After upscaling"))))
     nr_resolution = int(kwargs.get("nr_resolution", kwargs.get("NR resolution (%)", 100)))
     neural_passes = int(kwargs.get("neural_passes", kwargs.get("Neural passes", 1)))
     full_network = bool(kwargs.get("full_network", preset_vals.get("full_network", kwargs.get("Full network (all 71 blocks)", True))))
     fast_mode = bool(kwargs.get("fast_mode", kwargs.get("Fast mode", False)))
     dynamic_nr_resolution = bool(kwargs.get("dynamic_nr_resolution", kwargs.get("Dynamic NR resolution", False)))
-    model_interleave = str(kwargs.get("model_interleave", kwargs.get("Model interleave", "Off")))
+    model_interleave = str(kwargs.get("model_interleave", kwargs.get("Model interleave", "Off (Every frame)")))
 
     residual_strength = float(kwargs.get("residual_strength", preset_vals.get("residual_strength", 1.00)))
     residual_limit = float(kwargs.get("residual_limit", preset_vals.get("residual_limit", 0.25)))
@@ -424,7 +436,7 @@ class RH_DLSS5Enhance_AMD:
 
                 # AMD-NR Core
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
-                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
+                "neural_runtime": (_NEURAL_RUNTIMES, {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs: danielblnc 0.5.1 (native HIP kernel suite) or lmxxf (71-block neural runtime with complete temporal stability)."}),
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), DLSS (NVIDIA DLSS), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR natively consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "AMD-NR v0.3.5.6 style presets: Full Model Look (default in 0.3.5.6: After upscaling + Full network + Structure 2.00 + Temporal stability 0.50), NVIDIA look (Before upscaling + Full network), AMDNR soft (Before upscaling + Full network off), Cinematic, Crisp, Natural, Vivid, or Custom."}),
@@ -439,7 +451,7 @@ class RH_DLSS5Enhance_AMD:
                 "full_network": ("BOOLEAN", {"default": True, "tooltip": "Run full 71-block neural network (lmxxf runtime)."}),
                 "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Enable fast execution mode for higher throughput."}),
                 "dynamic_nr_resolution": ("BOOLEAN", {"default": False, "tooltip": "Dynamic neural rendering resolution scaling."}),
-                "model_interleave": (["Off", "On"], {"default": "Off", "tooltip": "Interleave neural model evaluations across frames."}),
+                "model_interleave": (_MODEL_INTERLEAVE_OPTIONS, {"default": "Off (Every frame)", "tooltip": "Cadence for interleaving neural model evaluations across frames: Off (Every frame = 0), 2x (Every 2nd frame = 2), 3x (Every 3rd frame = 3), or 4x (Every 4th frame = 4)."}),
 
                 # Quality
                 "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Residual transfer strength: Controls how much high-frequency reconstructed detail is transferred to the image."}),
@@ -535,9 +547,6 @@ class RH_DLSS5Enhance_AMD:
         video = kwargs.get("video")
         if image is None and video is None:
             raise DLSS5Error("The enhance node needs at least one input: connect `image` or `video`.")
-        enable_nr = kwargs.get("enable_nr", kwargs.get("Enable Neural Rendering", True))
-        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off") or str(kwargs.get("style", "")).startswith("off"):
-            return self._bypass_passthrough(image, video, kwargs)
         params = _build_params(kwargs)
         is_zluda = params.get("is_zluda", False)
         backend_name = "zluda-tensor" if is_zluda else _pick_backend(kwargs.get("backend", "auto"))
@@ -1035,7 +1044,7 @@ class RH_DLSS5ImageEnhance_AMD:
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX via amd_fidelityfx_upscaler_dx12.dll), XeSS (Intel XeSS via libxess.dll), DLSS (NVIDIA DLSS via nvngx_dlss.dll), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR via amd_fidelityfx_denoiser_dx12.dll consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
-                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
+                "neural_runtime": (_NEURAL_RUNTIMES, {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs: danielblnc 0.5.1 (native HIP kernel suite) or lmxxf (71-block neural runtime with complete temporal stability)."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "OptiScaler / AMD-NR v0.3.5.6 style presets."}),
                 "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling", "tooltip": "Run neural rendering before or after the upscaling carrier pass."}),
                 "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5, "tooltip": "NR working resolution percentage."}),
@@ -1046,7 +1055,7 @@ class RH_DLSS5ImageEnhance_AMD:
                 "full_network": ("BOOLEAN", {"default": True, "tooltip": "Run full 71-block neural network (lmxxf runtime)."}),
                 "fast_mode": ("BOOLEAN", {"default": False, "tooltip": "Fast execution mode for higher throughput."}),
                 "dynamic_nr_resolution": ("BOOLEAN", {"default": False, "tooltip": "Dynamic neural rendering resolution scaling."}),
-                "model_interleave": (["Off", "On"], {"default": "Off", "tooltip": "Interleave neural model evaluations."}),
+                "model_interleave": (_MODEL_INTERLEAVE_OPTIONS, {"default": "Off (Every frame)", "tooltip": "Cadence for interleaving neural model evaluations across frames: Off (Every frame = 0), 2x (Every 2nd frame = 2), 3x (Every 3rd frame = 3), or 4x (Every 4th frame = 4)."}),
                 "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Residual transfer strength (high-frequency detail)."}),
                 "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Residual clamp ratio."}),
                 "temporal_stability": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal stability to suppress flicker."}),
@@ -1078,9 +1087,6 @@ class RH_DLSS5ImageEnhance_AMD:
     def enhance(self, image: torch.Tensor, **kwargs) -> tuple[torch.Tensor, str]:
         if image is None:
             raise DLSS5Error("The DLSS5 Image Enhance node requires an `image` input.")
-        enable_nr = kwargs.get("enable_nr", True)
-        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off"):
-            return image, "NR bypassed: image passed through unprocessed"
 
         params = _build_params(kwargs)
         is_zluda = params.get("is_zluda", False)
@@ -1113,7 +1119,8 @@ class RH_DLSS5ImageEnhance_AMD:
             )
 
         method_label = img_params.get("upscale_method_label", "FSR (AMD FidelityFX)")
-        note = f"IMAGE {int(image.shape[0])} frame(s) {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) (channel {order}, motion {engine})"
+        nr_state = f"+ AMD-NR ({backend_name})" if img_params.get("enable_nr", True) else f"(NR: Off) ({backend_name})"
+        note = f"IMAGE {int(image.shape[0])} frame(s) {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] {nr_state} (channel {order}, motion {engine})"
         if auto_note:
             note += f"; {auto_note}"
         return result, note
@@ -1135,7 +1142,7 @@ class RH_DLSS5VideoEnhance_AMD:
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), DLSS (NVIDIA DLSS), or Ray Reconstruction (DLSS-D Feature 13 / FSR-RR via amd_fidelityfx_denoiser_dx12.dll consuming Color, Depth, Motion, Normals, Albedo, Roughness)."}),
                 "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering."}),
-                "neural_runtime": (["lmxxf", "danielblnc 0.5.1"], {"default": "lmxxf", "tooltip": "Neural runtime engine for AMD GPUs: lmxxf (recommended 71-block neural runtime with complete temporal stability) or danielblnc 0.5.1."}),
+                "neural_runtime": (_NEURAL_RUNTIMES, {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs: danielblnc 0.5.1 (native HIP kernel suite) or lmxxf (71-block neural runtime with complete temporal stability)."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look"}),
                 "neural_placement": (["After upscaling", "Before upscaling"], {"default": "After upscaling"}),
                 "nr_resolution": ("INT", {"default": 100, "min": 10, "max": 200, "step": 5}),
@@ -1146,7 +1153,7 @@ class RH_DLSS5VideoEnhance_AMD:
                 "full_network": ("BOOLEAN", {"default": True}),
                 "fast_mode": ("BOOLEAN", {"default": False}),
                 "dynamic_nr_resolution": ("BOOLEAN", {"default": False}),
-                "model_interleave": (["Off", "On"], {"default": "Off"}),
+                "model_interleave": (_MODEL_INTERLEAVE_OPTIONS, {"default": "Off (Every frame)", "tooltip": "Cadence for interleaving neural model evaluations across frames: Off (Every frame = 0), 2x (Every 2nd frame = 2), 3x (Every 3rd frame = 3), or 4x (Every 4th frame = 4)."}),
                 "residual_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "residual_limit": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "temporal_stability": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -1184,12 +1191,6 @@ class RH_DLSS5VideoEnhance_AMD:
         video = kwargs.get("video")
         if images is None and video is None:
             raise DLSS5Error("The DLSS5 Video Enhance node requires `images` or `video` input.")
-        enable_nr = kwargs.get("enable_nr", True)
-        if not enable_nr or str(kwargs.get("nr_style", "")).startswith("off"):
-            from .dlss5nr.videoout import build_video
-            fps = float(kwargs.get("fps", 24.0))
-            v_obj, _ = build_video(images, fps, kwargs.get("audio"), video)
-            return images, v_obj, "NR bypassed: video passed through unprocessed"
 
         params = _build_params(kwargs)
         is_zluda = params.get("is_zluda", False)
@@ -1263,7 +1264,8 @@ class RH_DLSS5VideoEnhance_AMD:
             video_obj, vnote = build_video(result, fps, audio_source, video if keep_audio else None)
             out_video = video_obj
             method_label = vid_params.get("upscale_method_label", "FSR (AMD FidelityFX)")
-            notes.append(f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] + AMD-NR ({backend_name}) (channel {order}, motion {engine}); {vnote}")
+            nr_state = f"+ AMD-NR ({backend_name})" if vid_params.get("enable_nr", True) else f"(NR: Off) ({backend_name})"
+            notes.append(f"VIDEO {int(frames.shape[0])} frames @{fps:g}fps {iw}x{ih}->{ow}x{oh} via Dx12 [{method_label}] {nr_state} (channel {order}, motion {engine}); {vnote}")
 
         return out_image, out_video, " | ".join(notes)
 

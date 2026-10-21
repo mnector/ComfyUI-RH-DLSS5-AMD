@@ -256,15 +256,17 @@ void InitCameraMatrices(UINT w, UINT h) {
     float fov = 1.04719755f; // 60 deg
     float aspect = (float)w / (float)h;
     float nearZ = 0.1f;
-    float farZ = 1000.0f;
+    float farZ = 100.0f;
     float tanHalfFov = tanf(fov / 2.0f);
 
     memset(g_ViewToClip, 0, sizeof(g_ViewToClip));
     g_ViewToClip[0] = 1.0f / (aspect * tanHalfFov);
     g_ViewToClip[5] = 1.0f / tanHalfFov;
-    g_ViewToClip[10] = farZ / (farZ - nearZ);
+    // DirectX 12 Reversed-Z projection matrix coefficients:
+    // Ensures OptiScaler extracts correct near=0.1, far=100.0 depth bounds so backgrounds are razor sharp
+    g_ViewToClip[10] = -nearZ / (farZ - nearZ);
     g_ViewToClip[11] = 1.0f;
-    g_ViewToClip[14] = -(farZ * nearZ) / (farZ - nearZ);
+    g_ViewToClip[14] = (nearZ * farZ) / (farZ - nearZ);
     g_ViewToClip[15] = 0.0f;
 }
 
