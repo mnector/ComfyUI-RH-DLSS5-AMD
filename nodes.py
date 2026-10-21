@@ -91,7 +91,6 @@ def _channel_choice(frame: np.ndarray, reference: np.ndarray, order: str) -> tup
 
 
 def _build_params(kwargs: dict) -> dict:
-    mode = kwargs.get("upscaling_mode") or kwargs.get("Upscaling Mode") or _UPSCALE_MODES[0]
     backend = kwargs.get("backend") or kwargs.get("amd_backend") or "amd_nr_bridge"
     is_zluda = (backend == "zluda_tensor")
 
@@ -108,22 +107,43 @@ def _build_params(kwargs: dict) -> dict:
         method_label = "FSR (AMD FidelityFX)"
 
     runtime = common.resolve_runtime_dir(kwargs.get("runtime_dir", "") or "", allow_fallback=is_zluda)
-    mode_name = str(mode).strip()
-    auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
+
+    scale = 1.0
+    auto_bucket = None
+    if "upscaling_factor" in kwargs or "Upscaling factor" in kwargs:
+        raw_val = kwargs.get("upscaling_factor", kwargs.get("Upscaling factor", 1.0))
+        try:
+            scale = float(raw_val)
+        except (ValueError, TypeError):
+            scale = 1.0
+    elif "upscaling_mode" in kwargs or "Upscaling Mode" in kwargs:
+        mode = kwargs.get("upscaling_mode") or kwargs.get("Upscaling Mode") or "1x"
+        mode_name = str(mode).strip()
+        auto_bucket = mode_name if mode_name in common.AUTO_BUCKETS else None
+        if auto_bucket is None:
+            mode_str = mode_name.lower()
+            if "1.5" in mode_str or "quality" in mode_str:
+                scale = 1.5
+            elif "1.724" in mode_str or "balanced" in mode_str or "balance" in mode_str:
+                scale = 1.724
+            elif "3x" in mode_str or "ultra" in mode_str:
+                scale = 3.0
+            elif "2x" in mode_str or "performance" in mode_str:
+                scale = 2.0
+            elif "4x" in mode_str:
+                scale = 4.0
+            else:
+                scale = 1.0
+    elif "upscaling_method" in kwargs:
+        try:
+            scale = float(kwargs["upscaling_method"])
+        except (ValueError, TypeError):
+            pass
+
+    scale = max(1.0, float(scale))
     if auto_bucket is not None:
         common.check_runtime_files(runtime, 1.0, is_zluda=is_zluda)
     else:
-        mode_str = str(mode).lower()
-        if "1.5" in mode_str or "quality" in mode_str:
-            scale = 1.5
-        elif "1.724" in mode_str or "balanced" in mode_str or "balance" in mode_str:
-            scale = 1.724
-        elif "3x" in mode_str or "ultra" in mode_str:
-            scale = 3.0
-        elif "2x" in mode_str or "performance" in mode_str:
-            scale = 2.0
-        else:
-            scale = 1.0
         common.check_runtime_files(runtime, scale, is_zluda=is_zluda)
 
     nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Full Model Look"
@@ -397,7 +417,7 @@ class RH_DLSS5Enhance_AMD:
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD (danielblnc native HIP kernels or lmxxf runtime)."}),
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology: FSR (AMD FidelityFX), XeSS (Intel XeSS), or DLSS (NVIDIA DLSS via translation)."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Upscaling carrier resolution (1x enhances at native size; fixed factors upscale with FSR/DLSS/XeSS before/after neural pass; 1K/2K/4K/8K auto-fit short edge)."}),
+                "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "AMD-NR v0.3.5.6 style presets: Full Model Look (default in 0.3.5.6: After upscaling + Full network + Structure 2.00 + Temporal stability 0.50), NVIDIA look (Before upscaling + Full network), AMDNR soft (Before upscaling + Full network off), Cinematic, Crisp, Natural, Vivid, or Custom."}),
 
                 # Performance
@@ -1004,7 +1024,7 @@ class RH_DLSS5ImageEnhance_AMD:
             "required": {
                 "image": ("IMAGE", {"tooltip": "Input image or image batch (RGB float32 0-1)."}),
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4 via amd_fidelityfx_upscaler_dx12.dll), XeSS (Intel XeSS 1.3 via libxess.dll with DP4a), or DLSS (NVIDIA DLSS via nvngx_dlss.dll / DLSS Enabler)."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "1x enhances at native resolution (DLAA); 1.5x/1.724x/2x/3x upscale; 1K/2K/4K/8K auto-fit short edge."}),
+                "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering (DLSS-NR on AMD)."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1", "tooltip": "Neural runtime engine for AMD GPUs."}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look", "tooltip": "OptiScaler / AMD-NR v0.3.5.6 style presets."}),
@@ -1100,7 +1120,7 @@ class RH_DLSS5VideoEnhance_AMD:
             "required": {
                 "images": ("IMAGE", {"tooltip": "Video frames batch [Batch, H, W, C]."}),
                 "upscale_method": (_UPSCALE_METHODS, {"default": _UPSCALE_METHODS[0], "tooltip": "DirectX 12 carrier upscaler technology executed on your GPU: FSR (AMD FidelityFX 3.1/4), XeSS (Intel XeSS 1.3), or DLSS (NVIDIA DLSS via translation)."}),
-                "upscaling_mode": (_UPSCALE_MODES, {"default": _UPSCALE_MODES[0], "tooltip": "Carrier upscaling resolution."}),
+                "upscaling_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "round": 0.001, "tooltip": "Upscaling multiplier factor (e.g. 1.000 = native resolution / DLAA, 1.500, 2.000, 3.000, 4.000, etc.). Enter any decimal factor."}),
                 "enable_nr": ("BOOLEAN", {"default": True, "tooltip": "Enable DLSS 5 Neural Rendering."}),
                 "neural_runtime": (["danielblnc 0.5.1", "lmxxf"], {"default": "danielblnc 0.5.1"}),
                 "nr_style": (["Full Model Look", "NVIDIA look", "AMDNR soft", "Cinematic", "Crisp", "Natural", "Vivid", "Custom"], {"default": "Full Model Look"}),
@@ -1349,9 +1369,12 @@ NODE_CLASS_MAPPINGS = {
     "RH_DLSS5VideoEnhance_AMD": RH_DLSS5VideoEnhance_AMD,
     "RH_DLSS5ImageFrameInterpolation_AMD": RH_DLSS5ImageFrameInterpolation_AMD,
     "RH_DLSS5VideoFrameInterpolation_AMD": RH_DLSS5VideoFrameInterpolation_AMD,
+    "RH_DLSS5ImageInterpolate_AMD": RH_DLSS5ImageFrameInterpolation_AMD,
+    "RH_DLSS5VideoInterpolate_AMD": RH_DLSS5VideoFrameInterpolation_AMD,
     # Backward compatibility and unified workflow mappings
     "RH_DLSS5Enhance_AMD": RH_DLSS5Enhance_AMD,
     "RH_DLSS5FrameInterpolation_AMD": RH_DLSS5FrameInterpolation_AMD,
+    "RH_DLSS5Interpolate_AMD": RH_DLSS5FrameInterpolation_AMD,
     "Dlss5AmdFsrSimple": RH_DLSS5ImageEnhance_AMD,
     "Dlss5AmdNvidiaSimple": RH_DLSS5ImageEnhance_AMD,
     "Dlss5AmdIntelSimple": RH_DLSS5ImageEnhance_AMD,
@@ -1359,15 +1382,14 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RH_DLSS5ImageEnhance_AMD": "DLSS5 Image Enhance (NR / Upscale) [AMD]",
-    "RH_DLSS5VideoEnhance_AMD": "DLSS5 Video Enhance (NR / Upscale) [AMD]",
-    "RH_DLSS5ImageFrameInterpolation_AMD": "DLSS5 Image Frame Interpolation [AMD]",
-    "RH_DLSS5VideoFrameInterpolation_AMD": "DLSS5 Video Frame Interpolation [AMD]",
-    "RH_DLSS5Enhance_AMD": "RH DLSS5 Enhance (NR / Upscale) [AMD] (Unified)",
-    "RH_DLSS5FrameInterpolation_AMD": "RH DLSS5 Frame Interpolation [AMD] (Unified)",
-    "Dlss5AmdFsrSimple": "Dlss5 AMD FSR Simple (Legacy) [AMD]",
-    "Dlss5AmdNvidiaSimple": "Dlss5 AMD Nvidia Simple (Legacy) [AMD]",
-    "Dlss5AmdIntelSimple": "Dlss5 AMD Intel Simple (Legacy) [AMD]",
-    "Dlss5AmdImageEnhancer": "Dlss5 AMD Image Enhancer (Legacy) [AMD]",
+    "RH_DLSS5ImageEnhance_AMD": "DLSS5 Image Enhance AMD",
+    "RH_DLSS5VideoEnhance_AMD": "DLSS5 Video Enhance AMD",
+    "RH_DLSS5ImageFrameInterpolation_AMD": "DLSS5 Image Frame Interpolation AMD",
+    "RH_DLSS5VideoFrameInterpolation_AMD": "DLSS5 Video Frame Interpolation AMD",
+    "RH_DLSS5ImageInterpolate_AMD": "DLSS5 Image Frame Interpolation AMD",
+    "RH_DLSS5VideoInterpolate_AMD": "DLSS5 Video Frame Interpolation AMD",
+    "RH_DLSS5Enhance_AMD": "DLSS5 Enhance AMD (Unified)",
+    "RH_DLSS5FrameInterpolation_AMD": "DLSS5 Frame Interpolation AMD (Unified)",
+    "RH_DLSS5Interpolate_AMD": "DLSS5 Frame Interpolation AMD (Unified)",
 }
 

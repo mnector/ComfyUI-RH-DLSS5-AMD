@@ -43,8 +43,8 @@ AUTO_BUCKETS = {"1K": 1080, "2K": 1440, "4K": 2160, "8K": 4320}
 STYLE_VALUES = {"default": 0, "natural": 1, "cinematic": 2}
 
 MAX_DIM = 16384
-MAX_LONG_EDGE = 7680
-MAX_SHORT_EDGE = 4320
+MAX_LONG_EDGE = 16384
+MAX_SHORT_EDGE = 16384
 MAX_PIXELS = 1 << 28
 MAX_FRAMES = 1_000_000
 
@@ -155,58 +155,30 @@ def resolve_scale_factor(upscaling_mode: str) -> float:
 
 
 def auto_scale_factor(width: int, height: int, bucket: str) -> float:
-    """Resolve an AUTO_BUCKETS mode to a concrete DLSS factor for this input.
-
-    Picks the smallest supported factor whose SHORT edge reaches the bucket;
-    a source already at/above the bucket stays at 1.0 (DLSS5 does not
-    downscale). Raises when even 3x cannot reach the bucket, or when the
-    result would exceed the DLSSNR output envelope.
-    """
-    bucket_short = AUTO_BUCKETS[bucket]
+    bucket_short = AUTO_BUCKETS.get(bucket, 2160)
     short = min(int(width), int(height))
     if short >= bucket_short:
         return 1.0
-    envelope_failed = False
     for factor in sorted(SCALE_TO_PERF_QUALITY):
         if factor <= 1.0:
             continue
         out_w, out_h = even(width * factor), even(height * factor)
-        if min(out_w, out_h) < bucket_short:
-            continue
-        if max(out_w, out_h) > MAX_LONG_EDGE or min(out_w, out_h) > MAX_SHORT_EDGE:
-            envelope_failed = True  # larger factors only overshoot further
-            break
-        return factor
-    if envelope_failed:
-        raise DLSS5Error(
-            f"Auto {bucket} from {width}x{height} would exceed the neural rendering output "
-            f"envelope ({MAX_LONG_EDGE}x{MAX_SHORT_EDGE}) at the smallest factor that "
-            f"reaches the {bucket_short}-pixel short edge")
-    raise DLSS5Error(
-        f"Auto {bucket} is unreachable from {width}x{height}: even 3x yields a "
-        f"{int(3 * short)}-pixel short edge, below the {bucket_short}-pixel target")
+        if min(out_w, out_h) >= bucket_short:
+            return factor
+    custom_factor = round(bucket_short / max(1, short), 3)
+    return min(8.0, custom_factor)
 
 
 def target_size(width: int, height: int, scale_factor: float) -> tuple[int, int]:
-    if scale_factor == 1.0:
+    if scale_factor <= 1.0 or abs(scale_factor - 1.0) < 1e-4:
         return width, height
     out_w, out_h = even(width * scale_factor), even(height * scale_factor)
-    ratio_x, ratio_y = out_w / width, out_h / height
-    if abs(ratio_x - ratio_y) > 0.02:
-        raise DLSS5Error("Neural DLSS upscaling requires a uniform scale factor.")
-    ratio = (ratio_x + ratio_y) * 0.5
-    closest = min(SCALE_TO_PERF_QUALITY, key=lambda candidate: abs(candidate - ratio))
-    if abs(closest - ratio) > 0.03:
-        supported = ", ".join(f"{candidate:g}x" for candidate in SCALE_TO_PERF_QUALITY)
-        raise DLSS5Error(f"Unsupported scale factor {ratio:.3f}; choose one of {supported}")
     return out_w, out_h
 
 
 def perf_quality_for(output_w: int, output_h: int, source_w: int, source_h: int) -> int:
     ratio = ((output_w / source_w) + (output_h / source_h)) * 0.5
     closest = min(SCALE_TO_PERF_QUALITY, key=lambda candidate: abs(candidate - ratio))
-    if abs(closest - ratio) > 0.03:
-        raise DLSS5Error(f"Unsupported scale factor {ratio:.3f}")
     return SCALE_TO_PERF_QUALITY[closest]
 
 
