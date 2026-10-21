@@ -1082,7 +1082,11 @@ class RH_DLSS5ImageEnhance_AMD:
             from .dlss5nr.amd_engine import compute_motion_from_video
             w, h = int(image.shape[2]), int(image.shape[1])
             flow = compute_motion_from_video(motion_video, w, h)
-            params["override_motion"] = flow
+            params["warmup_dolly_motion"] = flow
+            f1_pixels = (motion_video[1].detach().cpu().numpy() * 255.0).astype(np.uint8)
+            if f1_pixels.ndim == 3 and f1_pixels.shape[-1] > 3:
+                f1_pixels = f1_pixels[..., :3]
+            params["warmup_dolly_frame"] = f1_pixels
             params["motion_engine"] = "depthflow_dis"
 
         depthmap = kwargs.get("depthmap")

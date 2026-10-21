@@ -129,6 +129,12 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
                 config.remove_option("DlssNr", "Scale")
             if config.has_option("DlssNr", "Residual"):
                 config.remove_option("DlssNr", "Residual")
+            config.set("DlssNr", "UseDepth", "1")
+            config.set("DlssNr", "UseFsrInputs", "1")
+            config.set("DlssNr", "Temporal", "1")
+            config.set("DlssNr", "DepthInverted", "1")
+            config.set("DlssNr", "UseAutoMask", "1")
+            config.set("DlssNr", "FreshExposure", "1")
             config.set("DlssNr", "WorkingScale", f"{working_scale:.2f}")
             config.set("DlssNr", "Passes", str(passes))
             config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
@@ -146,6 +152,21 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "AmdDeviceGate", "false")
             config.set("DlssNr", "AmdBootstrapQueue", "true")
             config.set("DlssNr", "AmdFaceDetail", "true")
+
+            # [DlssNrOnAmd] - Direct runtime configuration for danielblnc dlssnr_amd kernels
+            if not config.has_section("DlssNrOnAmd"):
+                config.add_section("DlssNrOnAmd")
+            config.set("DlssNrOnAmd", "Enabled", "1" if enable_nr else "0")
+            config.set("DlssNrOnAmd", "Residual", "1")
+            config.set("DlssNrOnAmd", "Temporal", "1")
+            config.set("DlssNrOnAmd", "UseDepth", "1")
+            config.set("DlssNrOnAmd", "UseFsrInputs", "1")
+            config.set("DlssNrOnAmd", "DepthInverted", "1")
+            config.set("DlssNrOnAmd", "PreHistory", "1")
+            config.set("DlssNrOnAmd", "UseAutoMask", "1")
+            config.set("DlssNrOnAmd", "UseGameExposure", "0")
+            config.set("DlssNrOnAmd", "Quality", "0" if not fast_m else "1")
+            config.set("DlssNrOnAmd", "SpinDraw", "1")
 
             # [AmdLook]
             if not config.has_section("AmdLook"):
@@ -178,6 +199,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             if not config.has_section("InitFlags"):
                 config.add_section("InitFlags")
             config.set("InitFlags", "AutoExposure", "false")
+            config.set("InitFlags", "DepthInverted", "true")
             config.set("InitFlags", "SkipFirstFrames", "0")
 
             # [Hotfix]
@@ -248,7 +270,8 @@ def compute_motion_from_video(motion_video: torch.Tensor, target_w: int, target_
 
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
     dis.setUseSpatialPropagation(True)
-    flow = dis.calc(g0, g1, None)
+    # DLSS motion vector convention: displacement from current (g1) back to previous (g0)
+    flow = dis.calc(g1, g0, None)
 
     if (g0.shape[1], g0.shape[0]) != (target_w, target_h):
         flow = cv2.resize(flow, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
@@ -311,40 +334,53 @@ class AmdBridgeDaemon:
 
         # Depth: Real Depth if provided, else neutral mid-plane 0.5 FP32
         if depth_f32 is not None:
-            d_arr = np.ascontiguousarray(depth_f32, dtype=np.float32)
-            if d_arr.ndim == 2:
-                d_arr = d_arr[..., None]
-            elif d_arr.ndim == 3 and d_arr.shape[-1] > 1:
-                d_arr = d_arr[..., :1]
+            d_arr = np.ascontiguousarray(depth_f32, dtype=np.float32).squeeze()
+            if d_arr.ndim == 3:
+                d_arr = d_arr[..., 0]
             if d_arr.shape[:2] != (h, w):
                 import cv2
-                d_arr = cv2.resize(d_arr.squeeze(-1), (w, h), interpolation=cv2.INTER_LINEAR)[..., None].astype(np.float32)
+                d_arr = cv2.resize(d_arr, (w, h), interpolation=cv2.INTER_LINEAR)
+            d_arr = np.clip(d_arr, 0.0, 1.0).astype(np.float32)
             d_arr.tofile(str(self.d_bin))
         else:
-            depth_const = np.full((h, w, 1), 0.5, dtype=np.float32)
+            depth_const = np.full((h, w), 0.5, dtype=np.float32)
             depth_const.tofile(str(self.d_bin))
 
-        # Motion vectors: RG FP16
+        # Motion vectors: RG FP16 (sized to display resolution so display motion allocation is satisfied)
         mvec_rg = np.ascontiguousarray(motion_fp16, dtype=np.float16)
+        if mvec_rg.shape[:2] != (self.output_h, self.output_w):
+            import cv2
+            scale_x = float(self.output_w) / float(mvec_rg.shape[1])
+            scale_y = float(self.output_h) / float(mvec_rg.shape[0])
+            mvec_resized = cv2.resize(mvec_rg.astype(np.float32), (self.output_w, self.output_h), interpolation=cv2.INTER_LINEAR)
+            mvec_resized[..., 0] *= scale_x
+            mvec_resized[..., 1] *= scale_y
+            mvec_rg = mvec_resized.astype(np.float16)
         mvec_rg.tofile(str(self.m_bin))
 
-        # Normal: Real Normal if provided, else flat (0, 0, 1, 0) FP16
+        # Normal: Real Normal if provided, else flat (0, 0, 1, 1) FP16
         if normal_fp16 is not None:
             n_arr = np.ascontiguousarray(normal_fp16, dtype=np.float32)
+            if n_arr.ndim == 4:
+                n_arr = n_arr[0]
             if n_arr.shape[:2] != (h, w):
                 import cv2
                 n_arr = cv2.resize(n_arr, (w, h), interpolation=cv2.INTER_LINEAR)
             normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
             normal_rgba[..., :3] = n_arr[..., :3].astype(np.float16)
+            normal_rgba[..., 3] = 1.0
             normal_rgba.tofile(str(self.n_bin))
         else:
             normal_rgba = np.zeros((h, w, 4), dtype=np.float16)
             normal_rgba[..., 2] = 1.0
+            normal_rgba[..., 3] = 1.0
             normal_rgba.tofile(str(self.n_bin))
 
         # Albedo: Real Albedo if provided, else copy of color
         if albedo_fp16 is not None:
             a_arr = np.ascontiguousarray(albedo_fp16, dtype=np.float32)
+            if a_arr.ndim == 4:
+                a_arr = a_arr[0]
             if a_arr.shape[:2] != (h, w):
                 import cv2
                 a_arr = cv2.resize(a_arr, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -506,7 +542,19 @@ def amd_bridge_process_frames(
                     a_frame = np.pad(a_frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge") if a_frame.ndim == 3 else np.pad(a_frame, ((0, pad_h), (0, pad_w)), mode="edge")
 
             if index == 0:
-                out = daemon.start_and_process_first(pixels_u8, motion, d_frame, n_frame, a_frame)
+                warmup_frame = params.get("warmup_dolly_frame")
+                warmup_motion = params.get("warmup_dolly_motion")
+                if warmup_frame is not None and warmup_motion is not None:
+                    # Prime temporal history with Depthflow Dolly frame 1 + real optical flow
+                    if needs_padding:
+                        warmup_frame = np.pad(warmup_frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+                        warmup_motion = np.pad(warmup_motion, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant", constant_values=0)
+                    daemon.start_and_process_first(warmup_frame, warmup_motion, d_frame, n_frame, a_frame)
+                    # Now execute target static frame (pixels_u8) with zero motion relative to itself
+                    zero_motion = np.zeros((proc_in_h, proc_in_w, 2), dtype=np.float16)
+                    out = daemon.process_next_frame(pixels_u8, zero_motion, d_frame, n_frame, a_frame)
+                else:
+                    out = daemon.start_and_process_first(pixels_u8, motion, d_frame, n_frame, a_frame)
             else:
                 out = daemon.process_next_frame(pixels_u8, motion, d_frame, n_frame, a_frame)
 

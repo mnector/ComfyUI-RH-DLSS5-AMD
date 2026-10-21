@@ -244,12 +244,86 @@ void RunOneEvalPass(
     NVSDK_NGX_Parameter* pParams, const NVSDK_NGX_Handle* pHandle,
     PFN_NVSDK_NGX_D3D12_EvaluateFeature pfnEval,
     ID3D12Resource* pOutput, ID3D12Resource* pColor,
+    ID3D12Resource* pDepth, ID3D12Resource* pMvec,
+    ID3D12Resource* pNormal, ID3D12Resource* pAlbedo,
+    ID3D12Resource* pExposure, UINT w, UINT h, UINT out_w, UINT out_h,
     IDXGISwapChain3* pSwapChain, int frameIndex, bool resetHistory)
 {
     g_pCommandAllocator->Reset();
     g_pCommandList->Reset(g_pCommandAllocator, nullptr);
 
     pParams->Set(NVSDK_NGX_Parameter_Reset, resetHistory ? 1 : 0);
+    pParams->Set("DLSSNR.Reset", resetHistory ? 1 : 0);
+    pParams->Set("DLSSG.Reset", resetHistory ? 1 : 0);
+
+    // Rebind all textures and buffers on every pass (ensures complete DX12 state)
+    pParams->Set(NVSDK_NGX_Parameter_Color, pColor);
+    pParams->Set("DLSSNR.Color", pColor);
+    pParams->Set("DLSSD.Color", pColor);
+    pParams->Set("DLSSNR.ColorSubrectBaseX", 0);
+    pParams->Set("DLSSNR.ColorSubrectBaseY", 0);
+    pParams->Set("DLSSNR.ColorSubrectWidth", w);
+    pParams->Set("DLSSNR.ColorSubrectHeight", h);
+
+    pParams->Set(NVSDK_NGX_Parameter_Output, pOutput);
+    pParams->Set("DLSSNR.Output", pOutput);
+    pParams->Set("DLSSNR.Backbuffer", pOutput);
+    pParams->Set("DLSSD.Output", pOutput);
+    pParams->Set("DLSSNR.OutputSubrectBaseX", 0);
+    pParams->Set("DLSSNR.OutputSubrectBaseY", 0);
+    pParams->Set("DLSSNR.OutputSubrectWidth", out_w);
+    pParams->Set("DLSSNR.OutputSubrectHeight", out_h);
+
+    pParams->Set(NVSDK_NGX_Parameter_Depth, pDepth);
+    pParams->Set("DLSSNR.Depth", pDepth);
+    pParams->Set("DLSSD.Depth", pDepth);
+    pParams->Set("DepthInverted", 1);
+    pParams->Set("DLSSNR.DepthInverted", 1);
+    pParams->Set("DLSSG.DepthInverted", 1);
+    pParams->Set("DLSS.Input.Depth.Subrect.Base.X", 0);
+    pParams->Set("DLSS.Input.Depth.Subrect.Base.Y", 0);
+    pParams->Set("DLSSNR.DepthSubrectBaseX", 0);
+    pParams->Set("DLSSNR.DepthSubrectBaseY", 0);
+    pParams->Set("DLSSNR.DepthSubrectWidth", w);
+    pParams->Set("DLSSNR.DepthSubrectHeight", h);
+
+    pParams->Set(NVSDK_NGX_Parameter_MotionVectors, pMvec);
+    pParams->Set("DLSSNR.MVec", pMvec);
+    pParams->Set("DLSSD.MotionVectors", pMvec);
+    pParams->Set("DLSS.Input.MV.Subrect.Base.X", 0);
+    pParams->Set("DLSS.Input.MV.Subrect.Base.Y", 0);
+    pParams->Set("DLSSNR.MVecSubrectBaseX", 0);
+    pParams->Set("DLSSNR.MVecSubrectBaseY", 0);
+    pParams->Set("DLSSNR.MVecSubrectWidth", out_w);
+    pParams->Set("DLSSNR.MVecSubrectHeight", out_h);
+    pParams->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
+    pParams->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
+    pParams->Set("DLSSNR.MVecScaleX", 1.0f);
+    pParams->Set("DLSSNR.MVecScaleY", 1.0f);
+
+    pParams->Set("Roughness", pNormal);
+    pParams->Set("GBuffer.Normals", pNormal);
+    pParams->Set("GBuffer.Roughness", pNormal);
+    pParams->Set("DLSS.Input.Normals", pNormal);
+    pParams->Set("DLSS.Input.Roughness", pNormal);
+    pParams->Set("InNormals", pNormal);
+    pParams->Set("OutNormals", pNormal);
+    pParams->Set("FfxDenoiserNormalsInViewSpace", 1);
+
+    pParams->Set("Albedo", pAlbedo);
+    pParams->Set("GBuffer.Albedo", pAlbedo);
+    pParams->Set("GBuffer.DiffuseAlbedo", pAlbedo);
+    pParams->Set("GBuffer.SpecularAlbedo", pAlbedo);
+    pParams->Set("DLSS.Input.DiffuseAlbedo", pAlbedo);
+    pParams->Set("DLSS.Input.SpecularAlbedo", pAlbedo);
+    pParams->Set("InDiffAlbedo", pAlbedo);
+    pParams->Set("InSpecAlbedo", pAlbedo);
+    pParams->Set("FfxDenoiserAlbedoFp16", 1);
+    pParams->Set("DLSS.Input.Bias.Current.Color.Mask", pAlbedo);
+
+    pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
+    pParams->Set("PreExposure", 1.0f);
+    pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
 
     TransitionResource(g_pCommandList, pOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -260,6 +334,10 @@ void RunOneEvalPass(
     while (idx3 > 0) { f3 /= 3.0f; r3 += f3 * (idx3 % 3); idx3 /= 3; }
     pParams->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, r2 - 0.5f);
     pParams->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, r3 - 0.5f);
+    pParams->Set("Jitter.Offset.X", r2 - 0.5f);
+    pParams->Set("Jitter.Offset.Y", r3 - 0.5f);
+    pParams->Set("DLSSG.JitterOffsetX", r2 - 0.5f);
+    pParams->Set("DLSSG.JitterOffsetY", r3 - 0.5f);
 
     NVSDK_NGX_Result res = pfnEval(g_pCommandList, pHandle, pParams, nullptr);
     if (NVSDK_NGX_FAILED(res)) {
@@ -486,7 +564,7 @@ int main(int argc, char** argv) {
     LOG("Creating GPU textures...");
     ID3D12Resource* pColor = CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST, true);
     ID3D12Resource* pDepth = CreateTexture(w, h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
-    ID3D12Resource* pMvec  = CreateTexture(w, h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* pMvec  = CreateTexture(out_w, out_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
     ID3D12Resource* pAlbedo = CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
     ID3D12Resource* pNormal = CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
     ID3D12Resource* pExposure = CreateTexture(1, 1, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -495,7 +573,7 @@ int main(int argc, char** argv) {
     // Upload initial frame data
     UploadTexture(pColor, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, colorData.data());
     UploadTexture(pDepth, w, h, DXGI_FORMAT_R32_FLOAT, 4, depthData.data());
-    UploadTexture(pMvec, w, h, DXGI_FORMAT_R16G16_FLOAT, 4, mvecData.data());
+    UploadTexture(pMvec, out_w, out_h, DXGI_FORMAT_R16G16_FLOAT, 4, mvecData.data());
 
     std::vector<uint8_t> albedoData = ReadFileBin(albedoPath);
     std::vector<uint8_t> normalData = ReadFileBin(normalPath);
@@ -542,6 +620,7 @@ int main(int argc, char** argv) {
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, h);
     pParams->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
     pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
+    pParams->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, (1 << 0) | (1 << 3) | (1 << 6)); // kMVLowRes | kDepthInverted | kAutoExposure
 
     // CreateFeature
     g_pCommandAllocator->Reset(); g_pCommandList->Reset(g_pCommandAllocator, nullptr);
@@ -557,19 +636,80 @@ int main(int argc, char** argv) {
     LOG("NGX Feature created.");
 
     // Set persistent params
+    // Color
     pParams->Set(NVSDK_NGX_Parameter_Color, pColor);
+    pParams->Set("DLSSNR.Color", pColor);
+    pParams->Set("DLSSD.Color", pColor);
+    pParams->Set("DLSSNR.ColorSubrectBaseX", 0);
+    pParams->Set("DLSSNR.ColorSubrectBaseY", 0);
+    pParams->Set("DLSSNR.ColorSubrectWidth", w);
+    pParams->Set("DLSSNR.ColorSubrectHeight", h);
+
+    // Output
     pParams->Set(NVSDK_NGX_Parameter_Output, pOutput);
+    pParams->Set("DLSSNR.Output", pOutput);
+    pParams->Set("DLSSNR.Backbuffer", pOutput);
+    pParams->Set("DLSSD.Output", pOutput);
+    pParams->Set("DLSSNR.OutputSubrectBaseX", 0);
+    pParams->Set("DLSSNR.OutputSubrectBaseY", 0);
+    pParams->Set("DLSSNR.OutputSubrectWidth", out_w);
+    pParams->Set("DLSSNR.OutputSubrectHeight", out_h);
+
+    // Depth
     pParams->Set(NVSDK_NGX_Parameter_Depth, pDepth);
+    pParams->Set("DLSSNR.Depth", pDepth);
+    pParams->Set("DLSSD.Depth", pDepth);
+    pParams->Set("DepthInverted", 1);
+    pParams->Set("DLSSNR.DepthInverted", 1);
+    pParams->Set("DLSSG.DepthInverted", 1);
+    pParams->Set("DLSS.Input.Depth.Subrect.Base.X", 0);
+    pParams->Set("DLSS.Input.Depth.Subrect.Base.Y", 0);
+    pParams->Set("DLSSNR.DepthSubrectBaseX", 0);
+    pParams->Set("DLSSNR.DepthSubrectBaseY", 0);
+    pParams->Set("DLSSNR.DepthSubrectWidth", w);
+    pParams->Set("DLSSNR.DepthSubrectHeight", h);
+
+    // Motion Vectors
     pParams->Set(NVSDK_NGX_Parameter_MotionVectors, pMvec);
-    pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
-    pParams->Set("PreExposure", 1.0f);
-    pParams->Set("Albedo", pAlbedo); pParams->Set("GBuffer.Albedo", pAlbedo);
-    pParams->Set("GBuffer.DiffuseAlbedo", pAlbedo);
-    pParams->Set("Roughness", pNormal); pParams->Set("GBuffer.Normals", pNormal);
-    pParams->Set("DLSS.Input.Bias.Current.Color.Mask", pAlbedo);
-    pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
+    pParams->Set("DLSSNR.MVec", pMvec);
+    pParams->Set("DLSSD.MotionVectors", pMvec);
+    pParams->Set("DLSS.Input.MV.Subrect.Base.X", 0);
+    pParams->Set("DLSS.Input.MV.Subrect.Base.Y", 0);
+    pParams->Set("DLSSNR.MVecSubrectBaseX", 0);
+    pParams->Set("DLSSNR.MVecSubrectBaseY", 0);
+    pParams->Set("DLSSNR.MVecSubrectWidth", out_w);
+    pParams->Set("DLSSNR.MVecSubrectHeight", out_h);
     pParams->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
+    pParams->Set("DLSSNR.MVecScaleX", 1.0f);
+    pParams->Set("DLSSNR.MVecScaleY", 1.0f);
+
+    // GBuffer Normals & Roughness
+    pParams->Set("Roughness", pNormal);
+    pParams->Set("GBuffer.Normals", pNormal);
+    pParams->Set("GBuffer.Roughness", pNormal);
+    pParams->Set("DLSS.Input.Normals", pNormal);
+    pParams->Set("DLSS.Input.Roughness", pNormal);
+    pParams->Set("InNormals", pNormal);
+    pParams->Set("OutNormals", pNormal);
+    pParams->Set("FfxDenoiserNormalsInViewSpace", 1);
+
+    // GBuffer Albedo & Diffuse
+    pParams->Set("Albedo", pAlbedo);
+    pParams->Set("GBuffer.Albedo", pAlbedo);
+    pParams->Set("GBuffer.DiffuseAlbedo", pAlbedo);
+    pParams->Set("GBuffer.SpecularAlbedo", pAlbedo);
+    pParams->Set("DLSS.Input.DiffuseAlbedo", pAlbedo);
+    pParams->Set("DLSS.Input.SpecularAlbedo", pAlbedo);
+    pParams->Set("InDiffAlbedo", pAlbedo);
+    pParams->Set("InSpecAlbedo", pAlbedo);
+    pParams->Set("FfxDenoiserAlbedoFp16", 1);
+    pParams->Set("DLSS.Input.Bias.Current.Color.Mask", pAlbedo);
+
+    // Exposure & Sharpening
+    pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
+    pParams->Set("PreExposure", 1.0f);
+    pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
 
@@ -596,7 +736,7 @@ int main(int argc, char** argv) {
     // =====================================================================
     LOG("=== Running " << std::dec << warmup_passes << " warmup passes (interval: " << warmup_interval_ms << " ms) ===");
     for (int i = 0; i < warmup_passes; ++i) {
-        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, i, i == 0);
+        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain, i, i == 0);
         if (warmup_interval_ms > 0) {
             Sleep(warmup_interval_ms);
         }
@@ -607,7 +747,7 @@ int main(int argc, char** argv) {
     // Run active neural evaluation passes for Frame 0
     LOG("=== Running " << passes << " active neural evaluation passes for Frame 0 ===");
     for (int i = 0; i < passes; ++i) {
-        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain, g_TotalFramesProcessed + i, false);
+        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain, g_TotalFramesProcessed + i, false);
     }
     g_TotalFramesProcessed += passes;
 
@@ -663,13 +803,13 @@ int main(int argc, char** argv) {
 
             if (!colorData.empty()) UploadTexture(pColor, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, colorData.data());
             if (!depthData.empty()) UploadTexture(pDepth, w, h, DXGI_FORMAT_R32_FLOAT, 4, depthData.data());
-            if (!mvecData.empty())  UploadTexture(pMvec, w, h, DXGI_FORMAT_R16G16_FLOAT, 4, mvecData.data());
+            if (!mvecData.empty())  UploadTexture(pMvec, out_w, out_h, DXGI_FORMAT_R16G16_FLOAT, 4, mvecData.data());
             if (!albedoData.empty()) UploadTexture(pAlbedo, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, albedoData.data());
             if (!normalData.empty()) UploadTexture(pNormal, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, normalData.data());
 
             // Run evaluation passes (GPU is already warm, no reset needed)
             for (int i = 0; i < evalPasses; ++i) {
-                RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pSwapChain,
+                RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain,
                                g_TotalFramesProcessed + i, false);
             }
             g_TotalFramesProcessed += evalPasses;
