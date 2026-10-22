@@ -168,14 +168,14 @@ def _build_params(kwargs: dict) -> dict:
 
     nr_style = kwargs.get("nr_style") or kwargs.get("NR style") or "Full Model Look"
     presets = {
-        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
-        "NVIDIA look":     {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": True},
+        "Full Model Look": {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "NVIDIA look":     {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.60, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": True},
         "AMDNR soft":      {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "Before upscaling", "full_network": False},
         "Cinematic":       {"residual_strength": 0.85, "residual_limit": 0.20, "temporal_stability": 0.75, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
         "Crisp":           {"residual_strength": 1.20, "residual_limit": 0.35, "temporal_stability": 0.50, "sharpening": 0.30, "detail_strength": 1.00, "colour_strength": 1.00},
         "Natural":         {"residual_strength": 0.70, "residual_limit": 0.15, "temporal_stability": 0.70, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00},
         "Vivid":           {"residual_strength": 1.10, "residual_limit": 0.30, "temporal_stability": 0.60, "sharpening": 0.15, "detail_strength": 1.00, "colour_strength": 1.00},
-        "Default":         {"residual_strength": 1.00, "residual_limit": 0.00, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
+        "Default":         {"residual_strength": 1.00, "residual_limit": 0.25, "temporal_stability": 0.50, "sharpening": 0.00, "detail_strength": 1.00, "colour_strength": 1.00, "neural_placement": "After upscaling", "full_network": True},
     }
     preset_vals = presets.get(nr_style, {})
 
@@ -190,7 +190,8 @@ def _build_params(kwargs: dict) -> dict:
     model_interleave = str(kwargs.get("model_interleave", kwargs.get("Model interleave", "Off (Every frame)")))
 
     residual_strength = float(kwargs.get("residual_strength", preset_vals.get("residual_strength", 1.00)))
-    residual_limit = float(kwargs.get("residual_limit", preset_vals.get("residual_limit", 0.25)))
+    res_limit_val = float(kwargs.get("residual_limit", preset_vals.get("residual_limit", 0.25)))
+    residual_limit = 0.25 if res_limit_val <= 0.0 else res_limit_val
     temporal_stability = float(kwargs.get("temporal_stability", preset_vals.get("temporal_stability", 0.60)))
     sharpening = float(kwargs.get("sharpening", preset_vals.get("sharpening", 0.00)))
     detail_strength = float(kwargs.get("detail_strength", preset_vals.get("detail_strength", 1.00)))

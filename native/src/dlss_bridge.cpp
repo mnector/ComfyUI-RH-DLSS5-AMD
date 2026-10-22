@@ -356,6 +356,12 @@ void RunOneEvalPass(
 
     pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
     pParams->Set("PreExposure", 1.0f);
+    pParams->Set("preExposure", 1.0f);
+    pParams->Set("FSR.preExposure", 1.0f);
+    pParams->Set("FSR.pre_exposure", 1.0f);
+    pParams->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.0f);
+    pParams->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
+    pParams->Set("ExposureScale", 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
 
     // Camera Matrices for FSR-RR (Ray Reconstruction Feature 13)
@@ -807,9 +813,13 @@ int main(int argc, char** argv) {
     // Exposure & Sharpening
     pParams->Set(NVSDK_NGX_Parameter_ExposureTexture, pExposure);
     pParams->Set("PreExposure", 1.0f);
+    pParams->Set("preExposure", 1.0f);
+    pParams->Set("FSR.preExposure", 1.0f);
+    pParams->Set("FSR.pre_exposure", 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.0f);
     pParams->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
+    pParams->Set("ExposureScale", 1.0f);
 
     // Initial transition for output
     g_pCommandAllocator->Reset(); g_pCommandList->Reset(g_pCommandAllocator, nullptr);
@@ -823,23 +833,28 @@ int main(int argc, char** argv) {
     g_pCommandList->Close();
     ID3D12CommandList* dl[] = { g_pCommandList }; g_pCommandQueue->ExecuteCommandLists(1, dl); WaitForGPU();
 
-    // User-controlled settlement pause before warmup passes
-    if (settle_pause_ms > 0) {
-        LOG("Applying user settlement pause: " << std::dec << settle_pause_ms << " ms");
-        Sleep(settle_pause_ms);
-    }
-
     // =====================================================================
     // WARMUP: Run evaluation passes with initial data to fully settle OptiScaler + AMD-NR
     // =====================================================================
-    LOG("=== Running " << std::dec << warmup_passes << " warmup passes (interval: " << warmup_interval_ms << " ms) ===");
-    for (int i = 0; i < warmup_passes; ++i) {
-        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain, i, i == 0);
-        if (warmup_interval_ms > 0) {
-            Sleep(warmup_interval_ms);
-        }
+    int effective_warmups = (warmup_passes < 6) ? 6 : warmup_passes;
+    int effective_interval = (warmup_interval_ms < 50) ? 50 : warmup_interval_ms;
+    int effective_settle_ms = (settle_pause_ms < 1500) ? 1500 : settle_pause_ms;
+
+    LOG("=== Initializing OptiScaler / AMD-NR with pass 0 ===");
+    RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain, 0, true);
+
+    // OptiScaler registers the new resolution on pass 0 and starts its internal settling watchdog.
+    // In games, 1500 ms passes over 90 continuous frames, but in single-frame ComfyUI processing,
+    // we pause for the hysteresis window so it transitions to steady-state and NEVER skips the neural pass!
+    LOG("OptiScaler resolution registered. Waiting " << std::dec << effective_settle_ms << " ms for AMD-NR settling window...");
+    Sleep(effective_settle_ms);
+
+    LOG("=== Running remaining " << std::dec << (effective_warmups - 1) << " warmup passes (interval: " << effective_interval << " ms) ===");
+    for (int i = 1; i < effective_warmups; ++i) {
+        RunOneEvalPass(pParams, pHandle, pfnEval, pOutput, pColor, pDepth, pMvec, pNormal, pAlbedo, pExposure, w, h, out_w, out_h, pSwapChain, i, false);
+        Sleep(effective_interval);
     }
-    g_TotalFramesProcessed = warmup_passes;
+    g_TotalFramesProcessed = effective_warmups;
     LOG("Warmup complete. OptiScaler and AMD-NR are settled and hot.");
 
     // Run active neural evaluation passes for Frame 0

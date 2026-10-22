@@ -87,6 +87,8 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
     enable_nr = bool(params.get("enable_nr", True))
     res_strength = float(params.get("residual_strength", preset_dict.get("residual_strength", 1.00)))
     res_limit = float(params.get("residual_limit", preset_dict.get("residual_limit", 0.25)))
+    if res_limit <= 0.0:
+        res_limit = 0.25
     temp_stability = float(params.get("temporal_stability", preset_dict.get("temporal_stability", 0.60)))
     sharpness = float(params.get("sharpening", preset_dict.get("sharpening", 0.00)))
     detail_str = float(params.get("detail_strength", preset_dict.get("detail_strength", 1.00)))
@@ -147,6 +149,7 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNr", "DepthInverted", "1")
             config.set("DlssNr", "UseAutoMask", "1")
             config.set("DlssNr", "FreshExposure", "0")
+            config.set("DlssNr", "UsePreExposure", "0")
             config.set("DlssNr", "WorkingScale", f"{working_scale:.2f}")
             config.set("DlssNr", "Passes", str(passes))
             config.set("DlssNr", "LmxxfFullNetwork", "true" if full_net else "false")
@@ -178,6 +181,8 @@ def write_amd_nr_config(runtime_dir: Path, params: dict) -> None:
             config.set("DlssNrOnAmd", "PreHistory", "1")
             config.set("DlssNrOnAmd", "UseAutoMask", "1")
             config.set("DlssNrOnAmd", "UseGameExposure", "1")
+            config.set("DlssNrOnAmd", "UsePreExposure", "0")
+            config.set("DlssNrOnAmd", "FreshExposure", "0")
             config.set("DlssNrOnAmd", "Quality", "0" if not fast_m else "1")
             config.set("DlssNrOnAmd", "SpinDraw", "1")
 
@@ -481,6 +486,9 @@ class AmdBridgeDaemon:
         if not self.o_bin.exists():
             raise RuntimeError("AMD-NR bridge did not produce output for frame 0")
         out_raw = np.fromfile(str(self.o_bin), dtype=np.float16).reshape((self.output_h, self.output_w, 4))
+        if np.isnan(out_raw).any() or np.isinf(out_raw).any():
+            print("[RH-DLSS5-AMD] WARNING: NaN/Inf detected in raw D3D12 output texture; sanitizing...", flush=True)
+            out_raw = np.nan_to_num(out_raw, nan=0.5, posinf=1.0, neginf=0.0)
         return out_raw[..., :3].astype(np.float32)
 
     def process_next_frame(
@@ -508,6 +516,9 @@ class AmdBridgeDaemon:
             if line == "DONE":
                 break
         out_raw = np.fromfile(str(self.o_bin), dtype=np.float16).reshape((self.output_h, self.output_w, 4))
+        if np.isnan(out_raw).any() or np.isinf(out_raw).any():
+            print("[RH-DLSS5-AMD] WARNING: NaN/Inf detected in raw D3D12 output texture; sanitizing...", flush=True)
+            out_raw = np.nan_to_num(out_raw, nan=0.5, posinf=1.0, neginf=0.0)
         return out_raw[..., :3].astype(np.float32)
 
     def close(self):
